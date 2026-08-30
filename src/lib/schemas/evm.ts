@@ -40,10 +40,6 @@ function withCalculateRefinements<
     );
 }
 
-export const evmCalculateSchema = withCalculateRefinements(
-  z.object(evmCalculateFields)
-);
-
 export const EvmCalculateDoRequestSchema = withCalculateRefinements(
   z.object({
     network: z.string().min(1),
@@ -87,7 +83,6 @@ export const EvmUnsignedTxSchema = z.discriminatedUnion("feeType", [
   }),
 ]);
 
-export type EvmCalculateRequest = z.infer<typeof evmCalculateSchema>;
 export type EvmCalculateDoRequest = z.infer<typeof EvmCalculateDoRequestSchema>;
 export type EvmCalculateResponse = z.infer<typeof evmCalculateResponseSchema>;
 export type EvmUnsignedTx = z.infer<typeof EvmUnsignedTxSchema>;

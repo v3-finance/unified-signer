@@ -1,34 +1,35 @@
-import { zValidator } from "@hono/zod-validator";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
-import { buildDerivationPath, inferFamilyFromPath } from "../lib/derivation";
-import { parseEvmNetworks, TRON_NETWORK_KEY } from "../lib/networks";
+import { inferFamilyFromPath } from "../lib/derivation";
+import {
+  listEvmChainIds,
+  parseEvmNetworks,
+  resolveEvmNetworkByChainId,
+  TRON_NETWORK_KEY,
+} from "../lib/networks";
 import { createDOClient } from "../lib/orm";
 import {
-  EvmWalletBalanceQuerySchema,
   OptionalEvmContractAddressSchema,
   OptionalTronContractAddressSchema,
-  TronWalletBalanceQuerySchema,
-  WalletDerivationQuerySchema,
 } from "../lib/schemas/shared";
-import { extractRawDerivationPath } from "./derivation-path";
-import { resolveEvmNetworkParam } from "./network";
-import { validationHook } from "./validation";
+import {
+  extractRawDerivationPath,
+  FAMILY_INFERENCE_HINT,
+} from "./derivation-path";
 
-const TronBalanceByPathQuerySchema = z.object({
+const TronBalanceQuerySchema = z.object({
   contractAddress: OptionalTronContractAddressSchema,
 });
 
-const EvmBalanceByPathQuerySchema = z.object({
+const EvmBalanceQuerySchema = z.object({
   contractAddress: OptionalEvmContractAddressSchema,
 });
 
 async function respondAddress(
   c: Context<Env, string>,
   networkKey: string,
-  path: string,
-  includePath: boolean
+  path: string
 ): Promise<Response> {
   const wallet = createDOClient(c, networkKey);
   const { address } = await wallet.registry().getAddress({
@@ -36,7 +37,7 @@ async function respondAddress(
     path,
   });
 
-  return c.json(includePath ? { address, path } : { address }, 200);
+  return c.json({ address, path }, 200);
 }
 
 async function respondBalance(
@@ -63,9 +64,9 @@ async function respondBalance(
 }
 
 export function registerWalletRoutes(app: Hono<Env>) {
-  // Global address lookup by raw derivation path. The chain family is
-  // inferred from the BIP44 coin type (44/60/... -> EVM, 44/195/... -> tron);
-  // the resulting EVM address is identical across all EVM networks.
+  // Address by raw derivation path. The chain family is inferred from the
+  // BIP44 coin type (44/60/... -> EVM, 44/195/... -> tron); the EVM address
+  // is identical across all configured EVM networks.
   app.get("/wallet/address/*", async (c) => {
     const resolution = extractRawDerivationPath(c, "/wallet/address/");
 
@@ -77,17 +78,13 @@ export function registerWalletRoutes(app: Hono<Env>) {
 
     if (!family) {
       return c.json(
-        {
-          error:
-            "Cannot infer the network family from this path. Use a BIP44-shaped path (44/60/... or 44/195/...) or the network-scoped endpoint /{network}/wallet/address/<path>.",
-          path: resolution.path,
-        },
+        { error: FAMILY_INFERENCE_HINT, path: resolution.path },
         400
       );
     }
 
     if (family === "tron") {
-      return respondAddress(c, TRON_NETWORK_KEY, resolution.path, true);
+      return respondAddress(c, TRON_NETWORK_KEY, resolution.path);
     }
 
     const firstEvmNetwork = parseEvmNetworks(c.env.EVM_NETWORKS)[0];
@@ -96,66 +93,37 @@ export function registerWalletRoutes(app: Hono<Env>) {
       return c.json({ error: "No EVM networks are configured" }, 400);
     }
 
-    return respondAddress(c, firstEvmNetwork.key, resolution.path, true);
+    return respondAddress(c, firstEvmNetwork.key, resolution.path);
   });
 
-  // Tron routes are registered before the `:network` routes so the static
-  // `/tron` prefix wins for Tron requests.
-  app.get(
-    "/tron/wallet/address",
-    zValidator("query", WalletDerivationQuerySchema, validationHook),
-    async (c) => {
-      const params = c.req.valid("query");
-      return respondAddress(
-        c,
-        TRON_NETWORK_KEY,
-        buildDerivationPath("tron", params),
-        false
-      );
-    }
-  );
-
-  app.get("/tron/wallet/address/*", async (c) => {
-    const resolution = extractRawDerivationPath(
-      c,
-      "/tron/wallet/address/",
-      "tron"
-    );
+  // Balance by raw path: family from the coin type; for EVM the network is
+  // selected by the `chainId` query parameter.
+  app.get("/wallet/balance/*", async (c) => {
+    const resolution = extractRawDerivationPath(c, "/wallet/balance/");
 
     if (!resolution.ok) {
       return resolution.response;
     }
 
-    return respondAddress(c, TRON_NETWORK_KEY, resolution.path, true);
-  });
+    const family = inferFamilyFromPath(resolution.path);
 
-  app.get(
-    "/tron/wallet/balance",
-    zValidator("query", TronWalletBalanceQuerySchema, validationHook),
-    async (c) => {
-      const params = c.req.valid("query");
-      return respondBalance(
-        c,
-        TRON_NETWORK_KEY,
-        "TRX",
-        buildDerivationPath("tron", params),
-        params.contractAddress
+    if (!family) {
+      return c.json(
+        { error: FAMILY_INFERENCE_HINT, path: resolution.path },
+        400
       );
     }
-  );
 
-  app.get(
-    "/tron/wallet/balance/*",
-    zValidator("query", TronBalanceByPathQuerySchema, validationHook),
-    async (c) => {
-      const resolution = extractRawDerivationPath(
-        c,
-        "/tron/wallet/balance/",
-        "tron"
-      );
+    if (family === "tron") {
+      const query = TronBalanceQuerySchema.safeParse({
+        contractAddress: c.req.query("contractAddress"),
+      });
 
-      if (!resolution.ok) {
-        return resolution.response;
+      if (!query.success) {
+        return c.json(
+          { error: "Validation Error", details: query.error.issues },
+          400
+        );
       }
 
       return respondBalance(
@@ -163,104 +131,59 @@ export function registerWalletRoutes(app: Hono<Env>) {
         TRON_NETWORK_KEY,
         "TRX",
         resolution.path,
-        c.req.valid("query").contractAddress
+        query.data.contractAddress
       );
     }
-  );
 
-  app.get(
-    "/:network/wallet/address",
-    zValidator("query", WalletDerivationQuerySchema, validationHook),
-    async (c) => {
-      const resolution = resolveEvmNetworkParam(c);
+    const chainIdResult = z.coerce
+      .number()
+      .int()
+      .positive()
+      .safeParse(c.req.query("chainId"));
 
-      if (!resolution.ok) {
-        return resolution.response;
-      }
-
-      const params = c.req.valid("query");
-      return respondAddress(
-        c,
-        resolution.config.key,
-        buildDerivationPath("evm", params),
-        false
+    if (!chainIdResult.success) {
+      return c.json(
+        {
+          error:
+            "The chainId query parameter is required for EVM balances",
+          availableChainIds: listEvmChainIds(c.env.EVM_NETWORKS),
+        },
+        400
       );
     }
-  );
 
-  app.get("/:network/wallet/address/*", async (c) => {
-    const resolution = resolveEvmNetworkParam(c);
-
-    if (!resolution.ok) {
-      return resolution.response;
-    }
-
-    const pathResolution = extractRawDerivationPath(
-      c,
-      `/${resolution.config.key}/wallet/address/`,
-      "evm"
+    const config = resolveEvmNetworkByChainId(
+      chainIdResult.data,
+      c.env.EVM_NETWORKS
     );
 
-    if (!pathResolution.ok) {
-      return pathResolution.response;
+    if (!config) {
+      return c.json(
+        {
+          error: `Unknown chainId ${chainIdResult.data}`,
+          availableChainIds: listEvmChainIds(c.env.EVM_NETWORKS),
+        },
+        400
+      );
     }
 
-    return respondAddress(
+    const query = EvmBalanceQuerySchema.safeParse({
+      contractAddress: c.req.query("contractAddress"),
+    });
+
+    if (!query.success) {
+      return c.json(
+        { error: "Validation Error", details: query.error.issues },
+        400
+      );
+    }
+
+    return respondBalance(
       c,
-      resolution.config.key,
-      pathResolution.path,
-      true
+      config.key,
+      config.nativeSymbol,
+      resolution.path,
+      query.data.contractAddress
     );
   });
-
-  app.get(
-    "/:network/wallet/balance",
-    zValidator("query", EvmWalletBalanceQuerySchema, validationHook),
-    async (c) => {
-      const resolution = resolveEvmNetworkParam(c);
-
-      if (!resolution.ok) {
-        return resolution.response;
-      }
-
-      const params = c.req.valid("query");
-      return respondBalance(
-        c,
-        resolution.config.key,
-        resolution.config.nativeSymbol,
-        buildDerivationPath("evm", params),
-        params.contractAddress
-      );
-    }
-  );
-
-  app.get(
-    "/:network/wallet/balance/*",
-    zValidator("query", EvmBalanceByPathQuerySchema, validationHook),
-    async (c) => {
-      const resolution = resolveEvmNetworkParam(c);
-
-      if (!resolution.ok) {
-        return resolution.response;
-      }
-
-      const pathResolution = extractRawDerivationPath(
-        c,
-        `/${resolution.config.key}/wallet/balance/`,
-        "evm"
-      );
-
-      if (!pathResolution.ok) {
-        return pathResolution.response;
-      }
-
-      return respondBalance(
-        c,
-        resolution.config.key,
-        resolution.config.nativeSymbol,
-        pathResolution.path,
-        c.req.valid("query").contractAddress
-      );
-    }
-  );
 }

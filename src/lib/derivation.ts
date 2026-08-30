@@ -136,25 +136,6 @@ export function inferFamilyFromPath(path: string): ChainFamily | undefined {
   return undefined;
 }
 
-// true when a BIP44-shaped path (first level 44) carries a coin type other
-// than the given family's — deriving a foreign-branch key against a network
-// is almost certainly a client mistake. Non-BIP44 paths never conflict.
-export function pathFamilyConflict(path: string, family: ChainFamily): boolean {
-  const segments = path.split("/").slice(1);
-
-  if (segments.length < 2) {
-    return false;
-  }
-
-  if (Number.parseInt(segments[0] ?? "", 10) !== 44) {
-    return false;
-  }
-
-  return (
-    Number.parseInt(segments[1] ?? "", 10) !== SLIP44_COIN_TYPES[family]
-  );
-}
-
 export function createDerivationRoot(mnemonic: string): BIP32Interface {
   const seed = bip39.mnemonicToSeedSync(mnemonic);
   return bip32.fromSeed(seed);

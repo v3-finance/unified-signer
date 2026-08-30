@@ -6,7 +6,6 @@ import {
   EvmAddressSchema,
   OptionalAnyContractAddressSchema,
   TronAddressSchema,
-  WalletDerivationFieldsSchema,
 } from "./shared";
 import { EvmUnsignedTxSchema, RawTransactionSchema } from "./evm";
 
@@ -109,4 +108,3 @@ export type EvmTxSignRequest = z.infer<typeof EvmTxSignRequestSchema>;
 export type EvmTxSignResponse = z.infer<typeof EvmTxSignResponseSchema>;
 export type RegistryAddressQuery = z.infer<typeof RegistryAddressQuerySchema>;
 export type RegistryBalanceQuery = z.infer<typeof RegistryBalanceQuerySchema>;
-export type WalletDerivationParams = z.infer<typeof WalletDerivationFieldsSchema>;
