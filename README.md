@@ -53,11 +53,18 @@ The EVM address is identical across all configured EVM networks for the same der
 Every endpoint also accepts a raw derivation path directly in the URL, as an alternative to the `appId/purpose/asset/stage/index` parameters:
 
 ```
-GET  /wallet/address/44/60/0               # family inferred from the coin type
+# Global — the family comes from the coin type (44/60 = EVM, 44/195 = TRON);
+# for EVM the concrete network is selected by chainId (query param or body field)
+GET  /wallet/address/44/60/0
+GET  /wallet/balance/44/60/0?chainId=8453
+POST /transaction/44/60/0                  # {"chainId": 8453, ...} in the body
+POST /calculate/fees/44/60/0               # `from` is derived from the path
+
+# Network-scoped
 GET  /{network}/wallet/address/44/60/0
 GET  /{network}/wallet/balance/44/60/0?contractAddress=...
 POST /{network}/transaction/44/60/0
-POST /{network}/calculate/fees/44/60/0     # `from` is derived from the path
+POST /{network}/calculate/fees/44/60/0
 ```
 
 Raw paths are always non-hardened: segments are plain indexes, hardening markers (`h`/`'`) are not supported and rejected. `/44/60/0` derives `m/44/60/0` (not BIP44's hardened `m/44'/60'/0'`). Paths are 1-10 levels deep with indexes below 2^31; a leading `m` segment is optional, and percent-encoded separators (`44%2F60%2F0`) are accepted. On BIP44-shaped paths (first level 44) any coin type that differs from the network family is rejected with 400 (`44/195/...` or `44/0/...` on EVM endpoints, and vice versa).
@@ -162,9 +169,15 @@ curl "$BASE_URL/ethereum/wallet/balance?appId=0&purpose=0&asset=0&stage=0&index=
 ```
 
 ```bash
-# Same by raw path
+# Same by raw path (network-scoped)
 curl "$BASE_URL/base/wallet/balance/44/60/0"
 curl "$BASE_URL/base/wallet/balance/44/60/0?contractAddress=0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"
+```
+
+```bash
+# Global by raw path: EVM network via the chainId query parameter, TRON paths need none
+curl "$BASE_URL/wallet/balance/44/60/0?chainId=8453"
+curl "$BASE_URL/wallet/balance/44/195/0"
 ```
 
 Response: `{"asset": "TRX" | "ETH" | "<contract>", "value": "15000000"}`.
@@ -174,7 +187,21 @@ Response: `{"asset": "TRX" | "ETH" | "<contract>", "value": "15000000"}`.
 One endpoint per network; the body decides native vs token. `amount` is always a decimal string in the asset's own units — token decimals are read from the contract. Success: `201 {"txId": "...", "fee": "0.000315"}` (`fee` is a decimal string in the native coin, `"0"` when `gasFree`).
 
 ```bash
-# Native transfers
+# Global endpoint (recommended): family from the path's coin type, EVM network via chainId in the body
+curl -X POST "$BASE_URL/transaction/44/60/0" \
+  -H "Content-Type: application/json" \
+  -d '{"chainId": 8453, "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "0.05"}'
+```
+
+```bash
+# Global endpoint, TRON path — no chainId needed
+curl -X POST "$BASE_URL/transaction/44/195/0" \
+  -H "Content-Type: application/json" \
+  -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "1.5"}'
+```
+
+```bash
+# Native transfers (network-scoped, derivation parameters)
 curl -X POST "$BASE_URL/tron/transaction?appId=0&purpose=0&asset=0&stage=0&index=0" \
   -H "Content-Type: application/json" \
   -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "1.5"}'
@@ -235,6 +262,13 @@ curl -X POST "$BASE_URL/tron/calculate/fees/44/195/0" \
   -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "1.5"}'
 ```
 
+```bash
+# Global: `from` from the path, EVM network via chainId in the body
+curl -X POST "$BASE_URL/calculate/fees/44/60/0" \
+  -H "Content-Type: application/json" \
+  -d '{"chainId": 1, "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "0.05"}'
+```
+
 Note: EVM fee estimation simulates the transfer via `estimateGas`, so `from` must actually hold the transferred asset; otherwise the RPC revert is returned as a 400.
 
 ### Recipes
@@ -261,6 +295,7 @@ Note: EVM fee estimation simulates the transfer via `estimateGas`, so `from` mus
 | 400 | `{"error": "Unable to read token contract", "message"}` | `contractAddress` is not a readable token |
 | 400 | `{"error": "Invalid path segment ..."}` | Malformed raw derivation path |
 | 400 | `{"error": "Derivation path coin type does not match ..."}` | BIP44 coin type contradicts the network family |
+| 400 | `{"error": "Unknown chainId ...", "availableChainIds": [...]}` | chainId does not match any configured EVM network |
 | 400 | `{"ok": false, "error": "..."}` | Build/sign/estimate rejected by the chain (bad base58, estimateGas revert, ...) |
 | 404 | `{"error": "Unknown network ...", "availableNetworks": [...]}` | Unknown network key |
 | 502 | `{"error": "Failed to broadcast transaction", "details"}` | The network refused the signed transaction |

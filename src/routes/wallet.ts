@@ -3,7 +3,12 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import { buildDerivationPath, inferFamilyFromPath } from "../lib/derivation";
-import { parseEvmNetworks, TRON_NETWORK_KEY } from "../lib/networks";
+import {
+  listEvmChainIds,
+  parseEvmNetworks,
+  resolveEvmNetworkByChainId,
+  TRON_NETWORK_KEY,
+} from "../lib/networks";
 import { createDOClient } from "../lib/orm";
 import {
   EvmWalletBalanceQuerySchema,
@@ -12,7 +17,10 @@ import {
   TronWalletBalanceQuerySchema,
   WalletDerivationQuerySchema,
 } from "../lib/schemas/shared";
-import { extractRawDerivationPath } from "./derivation-path";
+import {
+  extractRawDerivationPath,
+  FAMILY_INFERENCE_HINT,
+} from "./derivation-path";
 import { resolveEvmNetworkParam } from "./network";
 import { validationHook } from "./validation";
 
@@ -97,6 +105,97 @@ export function registerWalletRoutes(app: Hono<Env>) {
     }
 
     return respondAddress(c, firstEvmNetwork.key, resolution.path, true);
+  });
+
+  // Global balance by raw path: family from the coin type; for EVM the
+  // network is selected by the `chainId` query parameter.
+  app.get("/wallet/balance/*", async (c) => {
+    const resolution = extractRawDerivationPath(c, "/wallet/balance/");
+
+    if (!resolution.ok) {
+      return resolution.response;
+    }
+
+    const family = inferFamilyFromPath(resolution.path);
+
+    if (!family) {
+      return c.json(
+        { error: FAMILY_INFERENCE_HINT, path: resolution.path },
+        400
+      );
+    }
+
+    if (family === "tron") {
+      const query = TronBalanceByPathQuerySchema.safeParse({
+        contractAddress: c.req.query("contractAddress"),
+      });
+
+      if (!query.success) {
+        return c.json(
+          { error: "Validation Error", details: query.error.issues },
+          400
+        );
+      }
+
+      return respondBalance(
+        c,
+        TRON_NETWORK_KEY,
+        "TRX",
+        resolution.path,
+        query.data.contractAddress
+      );
+    }
+
+    const chainIdResult = z.coerce
+      .number()
+      .int()
+      .positive()
+      .safeParse(c.req.query("chainId"));
+
+    if (!chainIdResult.success) {
+      return c.json(
+        {
+          error:
+            "The chainId query parameter is required for EVM balances",
+          availableChainIds: listEvmChainIds(c.env.EVM_NETWORKS),
+        },
+        400
+      );
+    }
+
+    const config = resolveEvmNetworkByChainId(
+      chainIdResult.data,
+      c.env.EVM_NETWORKS
+    );
+
+    if (!config) {
+      return c.json(
+        {
+          error: `Unknown chainId ${chainIdResult.data}`,
+          availableChainIds: listEvmChainIds(c.env.EVM_NETWORKS),
+        },
+        400
+      );
+    }
+
+    const query = EvmBalanceByPathQuerySchema.safeParse({
+      contractAddress: c.req.query("contractAddress"),
+    });
+
+    if (!query.success) {
+      return c.json(
+        { error: "Validation Error", details: query.error.issues },
+        400
+      );
+    }
+
+    return respondBalance(
+      c,
+      config.key,
+      config.nativeSymbol,
+      resolution.path,
+      query.data.contractAddress
+    );
   });
 
   // Tron routes are registered before the `:network` routes so the static

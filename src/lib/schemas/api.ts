@@ -21,6 +21,19 @@ export const CreateEvmTransactionBodySchema = z.object({
   gasFree: z.boolean().default(false),
 });
 
+// Bodies for the global raw-path endpoints, where the EVM network is picked
+// by chainId in the body instead of a path prefix.
+export const ChainIdSchema = z.number().int().positive();
+
+export const CreateEvmTransactionByChainBodySchema =
+  CreateEvmTransactionBodySchema.extend({
+    chainId: ChainIdSchema,
+  });
+
+export type CreateEvmTransactionByChainBody = z.infer<
+  typeof CreateEvmTransactionByChainBodySchema
+>;
+
 // Fee-calculation bodies for the raw-path endpoints: `from` is derived from
 // the URL path instead of being passed explicitly.
 export const CalculateTronFeesByPathBodySchema = z.object({
@@ -34,6 +47,11 @@ export const CalculateEvmFeesByPathBodySchema = z.object({
   amount: DecimalAmountSchema,
   contract: EvmAddressSchema.optional(),
 });
+
+export const CalculateEvmFeesByChainBodySchema =
+  CalculateEvmFeesByPathBodySchema.extend({
+    chainId: ChainIdSchema,
+  });
 
 export type CreateTronTransactionBody = z.infer<
   typeof CreateTronTransactionBodySchema

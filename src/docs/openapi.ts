@@ -145,11 +145,21 @@ API для детерминированного управления кошел�
 
 ## Быстрая карта API
 
+**Глобальные эндпоинты** — семья сети выводится из coin type пути (\`44/60/...\` — EVM, \`44/195/...\` — TRON), конкретная EVM-сеть выбирается \`chainId\`:
+
+| Запрос | Что делает |
+|---|---|
+| \`GET /wallet/address/{path}\` | Адрес по пути (для EVM одинаков во всех сетях) |
+| \`GET /wallet/balance/{path}?chainId=1[&contractAddress]\` | Баланс; для EVM нужен \`chainId\` в query |
+| \`POST /transaction/{path}\` | Перевод; для EVM \`chainId\` в теле |
+| \`POST /calculate/fees/{path}\` | Расчёт комиссии; \`from\` из пути, для EVM \`chainId\` в теле |
+
+**Эндпоинты с сетью в пути** (\`{network}\`: ${networkList}):
+
 | Запрос | Что делает |
 |---|---|
 | \`GET /{network}/wallet/address?appId&purpose&asset&stage&index\` | Адрес по derivation-параметрам |
 | \`GET /{network}/wallet/address/{path}\` | Адрес по сырому пути |
-| \`GET /wallet/address/{path}\` | Адрес по пути без указания сети (семья выводится из coin type) |
 | \`GET /{network}/wallet/balance?...[&contractAddress]\` | Баланс нативной монеты или токена |
 | \`GET /{network}/wallet/balance/{path}[?contractAddress]\` | То же по сырому пути |
 | \`POST /{network}/transaction?...\` | Перевод: проверки балансов → комиссия → build → sign → broadcast |
@@ -157,8 +167,6 @@ API для детерминированного управления кошел�
 | \`POST /{network}/calculate/fees\` | Расчёт комиссии без отправки (\`from\` в теле) |
 | \`POST /{network}/calculate/fees/{path}\` | То же, \`from\` выводится из пути |
 | \`GET /\`, \`GET /doc\`, \`GET /llms.txt\` | Документация: Scalar UI, OpenAPI JSON, Markdown |
-
-Доступные сети этого деплоя: ${networkList}.
 
 - \`tron\` — сеть TRON поверх TronGrid
 - Остальные ключи — EVM-сети из конфигурации \`EVM_NETWORKS\` (chainId, RPC URL, нативная монета, режим комиссий). Добавление сети — только конфиг, без кода
@@ -225,14 +233,17 @@ GET ${baseUrl}/wallet/address/44/60/42
 
 ### Работа полностью по сырым путям
 
-Все операции доступны по пути — без derivation-параметров:
+Все операции доступны глобально — без derivation-параметров и без сети в URL. Семью сети определяет coin type пути, конкретную EVM-сеть — \`chainId\`:
 
 \`\`\`
 GET  ${baseUrl}/wallet/address/44/60/7
-GET  ${baseUrl}/base/wallet/balance/44/60/7
-POST ${baseUrl}/base/transaction/44/60/7          {"to": "0x...", "amount": "0.05"}
-POST ${baseUrl}/base/calculate/fees/44/60/7       {"to": "0x...", "amount": "0.05"}
+GET  ${baseUrl}/wallet/balance/44/60/7?chainId=8453
+POST ${baseUrl}/transaction/44/60/7        {"chainId": 8453, "to": "0x...", "amount": "0.05"}
+POST ${baseUrl}/transaction/44/195/7       {"to": "T...", "amount": "1.5"}
+POST ${baseUrl}/calculate/fees/44/60/7     {"chainId": 8453, "to": "0x...", "amount": "0.05"}
 \`\`\`
+
+Для TRON-путей (\`44/195/...\`) \`chainId\` не нужен. Неизвестный \`chainId\` вернёт 400 со списком \`availableChainIds\`. Те же операции доступны и с сетью в URL: \`/base/transaction/44/60/7\` и т.п.
 
 ## Денежные единицы
 
@@ -1134,6 +1145,211 @@ Raw paths are always non-hardened (\`/44/60/0\` derives \`m/44/60/0\`); hardenin
           },
         },
       },
+      "/wallet/balance/{path}": {
+        get: {
+          tags: ["Wallet"],
+          summary: "Get a wallet balance by raw path (network via chainId)",
+          description: `
+Global balance endpoint: the chain family is inferred from the path's coin type.
+
+- TRON paths (\`44/195/...\`) need no extra parameters
+- EVM paths (\`44/60/...\`) require the \`chainId\` query parameter to pick the network
+- Add \`contractAddress\` for token balances
+          `,
+          operationId: "getWalletBalanceByPathGlobal",
+          parameters: [
+            createDerivationPathParameter(),
+            {
+              name: "chainId",
+              in: "query",
+              required: false,
+              description:
+                "EVM chain id (required for EVM paths). Must match a configured network.",
+              schema: {
+                type: "integer",
+                enum: evmNetworks.map((network) => network.chainId),
+                example: evmNetworks[0]?.chainId ?? 1,
+              },
+            },
+            {
+              name: "contractAddress",
+              in: "query",
+              required: false,
+              description:
+                "Token contract address (TRC20 for tron paths, ERC20 for EVM paths).",
+              schema: { type: "string" },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Wallet balance in smallest units.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/WalletBalanceResponse" },
+                  examples: {
+                    evm: {
+                      summary: "GET /wallet/balance/44/60/0?chainId=8453",
+                      value: { asset: "ETH", value: "1500000000000000000" },
+                    },
+                    tron: {
+                      summary: "GET /wallet/balance/44/195/0",
+                      value: { asset: "TRX", value: "15000000" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": createErrorResponse(
+              "Malformed path, missing/unknown chainId, or invalid contract address.",
+              "The chainId query parameter is required for EVM balances"
+            ),
+          },
+        },
+      },
+      "/transaction/{path}": {
+        post: {
+          tags: ["Transaction"],
+          summary: "Build, sign and broadcast a transaction (network via chainId)",
+          description: `
+Global transaction endpoint — the recommended way to send. The chain family is inferred from the path's coin type:
+
+- \`/transaction/44/195/...\` — TRON: body with Base58 addresses, no \`chainId\`
+- \`/transaction/44/60/...\` — EVM: body with 0x addresses plus \`chainId\` selecting the network
+
+Execution flow, prechecks, \`gasFree\` and the response are identical to the network-scoped transaction endpoints.
+          `,
+          operationId: "createTransactionGlobal",
+          parameters: [createDerivationPathParameter()],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  oneOf: [
+                    {
+                      $ref: "#/components/schemas/CreateTronTransactionRequest",
+                    },
+                    {
+                      $ref: "#/components/schemas/CreateEvmTransactionByChainRequest",
+                    },
+                  ],
+                },
+                examples: {
+                  ethOnBase: {
+                    summary: "POST /transaction/44/60/0 — ETH on Base",
+                    value: {
+                      chainId: 8453,
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "0.05",
+                    },
+                  },
+                  usdtOnEthereum: {
+                    summary: "POST /transaction/44/60/0 — USDT on Ethereum",
+                    value: {
+                      chainId: 1,
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "100.5",
+                      contractAddress: USDT_ETHEREUM_CONTRACT,
+                    },
+                  },
+                  trxTransfer: {
+                    summary: "POST /transaction/44/195/0 — TRX (no chainId)",
+                    value: {
+                      to: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                      amount: "1.5",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description: "Transaction accepted by the network.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/CreateTransactionResponse",
+                  },
+                },
+              },
+            },
+            "400": createErrorResponse(
+              "Malformed path, family not inferable, unknown chainId, validation, balance or build/sign failure.",
+              "Unknown chainId 10"
+            ),
+            "502": {
+              description: "Broadcast was not accepted by the network.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/BroadcastErrorResponse" },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/calculate/fees/{path}": {
+        post: {
+          tags: ["Fees"],
+          summary: "Calculate transaction fees (network via chainId)",
+          description: `
+Global fee-calculation endpoint: \`from\` is derived from the path, the family from its coin type, and for EVM paths the network is selected by \`chainId\` in the body.
+          `,
+          operationId: "calculateFeesGlobal",
+          parameters: [createDerivationPathParameter()],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  oneOf: [
+                    { $ref: "#/components/schemas/CalculateFeesByPathRequest" },
+                    { $ref: "#/components/schemas/CalculateFeesByChainRequest" },
+                  ],
+                },
+                examples: {
+                  evm: {
+                    summary: "POST /calculate/fees/44/60/0 — USDT on Ethereum",
+                    value: {
+                      chainId: 1,
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "100",
+                      contract: USDT_ETHEREUM_CONTRACT,
+                    },
+                  },
+                  tron: {
+                    summary: "POST /calculate/fees/44/195/0 — TRX (no chainId)",
+                    value: {
+                      to: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                      amount: "1.5",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Fee calculation result (TRON or EVM shape).",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [
+                      { $ref: "#/components/schemas/TronCalculateFeesResponse" },
+                      { $ref: "#/components/schemas/EvmCalculateFeesResponse" },
+                    ],
+                  },
+                },
+              },
+            },
+            "400": createErrorResponse(
+              "Malformed path, family not inferable, unknown chainId, or validation failure.",
+              "Validation Error"
+            ),
+          },
+        },
+      },
       "/{anyNetwork}/wallet/address/{path}": {
         get: {
           tags: ["Wallet"],
@@ -1588,6 +1804,49 @@ The request body matches the network family: TRON body with Base58 addresses und
               default: false,
               description:
                 "Skip the fee pre-check. Gas parameters are still estimated and applied to the transaction.",
+            },
+          },
+        },
+        CreateEvmTransactionByChainRequest: {
+          type: "object",
+          required: ["chainId", "to", "amount"],
+          properties: {
+            chainId: {
+              type: "integer",
+              description:
+                "Chain id of a configured EVM network (e.g. 1, 56, 137, 8453).",
+              enum: evmNetworks.map((network) => network.chainId),
+            },
+            to: { $ref: "#/components/schemas/EvmAddress" },
+            amount: { $ref: "#/components/schemas/AmountString" },
+            contractAddress: {
+              allOf: [{ $ref: "#/components/schemas/EvmAddress" }],
+              description:
+                "Optional ERC20 contract address. Omit for native coin transfers.",
+            },
+            gasFree: {
+              type: "boolean",
+              default: false,
+              description: "Skip the fee pre-check.",
+            },
+          },
+        },
+        CalculateFeesByChainRequest: {
+          type: "object",
+          required: ["chainId", "to", "amount"],
+          properties: {
+            chainId: {
+              type: "integer",
+              description:
+                "Chain id of a configured EVM network (e.g. 1, 56, 137, 8453).",
+              enum: evmNetworks.map((network) => network.chainId),
+            },
+            to: { $ref: "#/components/schemas/EvmAddress" },
+            amount: { $ref: "#/components/schemas/AmountString" },
+            contract: {
+              allOf: [{ $ref: "#/components/schemas/EvmAddress" }],
+              description:
+                "Optional ERC20 contract address. If omitted, the calculation is for a native transfer.",
             },
           },
         },

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  listEvmChainIds,
   listNetworkKeys,
   parseEvmNetworks,
+  resolveEvmNetworkByChainId,
   resolveNetwork,
 } from "./networks";
 
@@ -71,6 +73,14 @@ describe("network configuration", () => {
       "ethereum",
       "bsc",
     ]);
+  });
+
+  test("resolves evm networks by chainId", () => {
+    const input = JSON.stringify(validNetworks);
+
+    expect(resolveEvmNetworkByChainId(56, input)?.key).toBe("bsc");
+    expect(resolveEvmNetworkByChainId(999, input)).toBeUndefined();
+    expect(listEvmChainIds(input)).toEqual([1, 56]);
   });
 
   test("resolves tron and evm networks", () => {

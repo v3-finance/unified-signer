@@ -9,6 +9,9 @@ export type RawPathResolution =
   | { ok: true; path: string }
   | { ok: false; response: Response };
 
+export const FAMILY_INFERENCE_HINT =
+  "Cannot infer the network family from this path. Use a BIP44-shaped path (44/60/... or 44/195/...) or the network-scoped endpoints.";
+
 // Extracts and canonicalizes the raw derivation path that follows `prefix` in
 // the request URL, e.g. "/ethereum/transaction/" + "44/60/0/0/5" ->
 // "m/44/60/0/0/5". When `family` is given, a BIP44-shaped path whose coin

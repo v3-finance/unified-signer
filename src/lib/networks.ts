@@ -68,6 +68,19 @@ export function listNetworkKeys(evmNetworksInput: unknown): string[] {
   ];
 }
 
+export function resolveEvmNetworkByChainId(
+  chainId: number,
+  evmNetworksInput: unknown
+): EvmNetworkConfig | undefined {
+  return parseEvmNetworks(evmNetworksInput).find(
+    (network) => network.chainId === chainId
+  );
+}
+
+export function listEvmChainIds(evmNetworksInput: unknown): number[] {
+  return parseEvmNetworks(evmNetworksInput).map((network) => network.chainId);
+}
+
 export function resolveNetwork(
   key: string,
   evmNetworksInput: unknown

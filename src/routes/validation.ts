@@ -1,5 +1,5 @@
 import type { Context } from "hono";
-import type { ZodError } from "zod";
+import type { z, ZodError } from "zod";
 import type { Env } from "../env";
 
 // Default zValidator failures return a raw ZodError dump; this hook produces
@@ -20,6 +20,45 @@ export function validationHook(
       400
     );
   }
+}
+
+// Manual body validation for endpoints whose schema depends on runtime state
+// (e.g. the chain family inferred from the URL path); mirrors validationHook's
+// error shape.
+export async function parseJsonBodyOr400<Schema extends z.ZodTypeAny>(
+  c: Context<Env, string>,
+  schema: Schema
+): Promise<
+  | { ok: true; data: z.output<Schema> }
+  | { ok: false; response: Response }
+> {
+  let raw: unknown;
+
+  try {
+    raw = await c.req.json();
+  } catch {
+    return {
+      ok: false,
+      response: c.json({ error: "Request body must be valid JSON" }, 400),
+    };
+  }
+
+  const result = schema.safeParse(raw);
+
+  if (!result.success) {
+    return {
+      ok: false,
+      response: c.json(
+        {
+          error: "Validation Error",
+          details: result.error.issues,
+        },
+        400
+      ),
+    };
+  }
+
+  return { ok: true, data: result.data as z.output<Schema> };
 }
 
 // Amount-to-base-units conversion can reject schema-valid input (more

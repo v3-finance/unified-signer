@@ -2,19 +2,23 @@ import { zValidator } from "@hono/zod-validator";
 import type { Context, Hono } from "hono";
 import { z, type ZodIssue } from "zod";
 import type { Env } from "../env";
-import { buildDerivationPath } from "../lib/derivation";
+import { buildDerivationPath, inferFamilyFromPath } from "../lib/derivation";
 import { publicErrorMessage } from "../lib/errors";
 import { broadcastEvmTransaction, createEvmClient } from "../lib/evm/client";
 import { getErc20TokenInfo } from "../lib/evm/token";
 import {
+  listEvmChainIds,
+  resolveEvmNetworkByChainId,
   TRON_NETWORK_KEY,
   type EvmNetworkConfig,
 } from "../lib/networks";
 import { createDOClient } from "../lib/orm";
 import {
+  CalculateEvmFeesByChainBodySchema,
   CalculateEvmFeesByPathBodySchema,
   CalculateTronFeesByPathBodySchema,
   CreateEvmTransactionBodySchema,
+  CreateEvmTransactionByChainBodySchema,
   CreateTronTransactionBodySchema,
   type CreateEvmTransactionBody,
   type CreateTronTransactionBody,
@@ -28,9 +32,16 @@ import {
 } from "../lib/tron/client";
 import { getTrc20TokenInfo } from "../lib/tron/token";
 import { normalizeTrc20Amount, toBaseUnits, trxToSunStr } from "../lib/utils";
-import { extractRawDerivationPath } from "./derivation-path";
+import {
+  extractRawDerivationPath,
+  FAMILY_INFERENCE_HINT,
+} from "./derivation-path";
 import { resolveEvmNetworkParam } from "./network";
-import { convertAmountOr400, validationHook } from "./validation";
+import {
+  convertAmountOr400,
+  parseJsonBodyOr400,
+  validationHook,
+} from "./validation";
 
 const BroadcastTransactionResponseSchema = z.object({
   result: z.boolean().optional(),
@@ -414,6 +425,139 @@ async function executeEvmTransaction(
 }
 
 export function registerTransactionRoutes(app: Hono<Env>) {
+  // Global raw-path endpoints: the chain family comes from the path's coin
+  // type (44/195 -> tron, 44/60 -> EVM); for EVM the concrete network is
+  // selected by `chainId` in the body.
+  app.post("/transaction/*", async (c) => {
+    const pathResolution = extractRawDerivationPath(c, "/transaction/");
+
+    if (!pathResolution.ok) {
+      return pathResolution.response;
+    }
+
+    const family = inferFamilyFromPath(pathResolution.path);
+
+    if (!family) {
+      return c.json(
+        { error: FAMILY_INFERENCE_HINT, path: pathResolution.path },
+        400
+      );
+    }
+
+    if (family === "tron") {
+      const body = await parseJsonBodyOr400(c, CreateTronTransactionBodySchema);
+
+      if (!body.ok) {
+        return body.response;
+      }
+
+      return executeTronTransaction(c, pathResolution.path, body.data);
+    }
+
+    const body = await parseJsonBodyOr400(
+      c,
+      CreateEvmTransactionByChainBodySchema
+    );
+
+    if (!body.ok) {
+      return body.response;
+    }
+
+    const config = resolveEvmNetworkByChainId(
+      body.data.chainId,
+      c.env.EVM_NETWORKS
+    );
+
+    if (!config) {
+      return c.json(
+        {
+          error: `Unknown chainId ${body.data.chainId}`,
+          availableChainIds: listEvmChainIds(c.env.EVM_NETWORKS),
+        },
+        400
+      );
+    }
+
+    const { chainId: _chainId, ...evmBody } = body.data;
+    return executeEvmTransaction(c, config, pathResolution.path, evmBody);
+  });
+
+  app.post("/calculate/fees/*", async (c) => {
+    const pathResolution = extractRawDerivationPath(c, "/calculate/fees/");
+
+    if (!pathResolution.ok) {
+      return pathResolution.response;
+    }
+
+    const family = inferFamilyFromPath(pathResolution.path);
+
+    if (!family) {
+      return c.json(
+        { error: FAMILY_INFERENCE_HINT, path: pathResolution.path },
+        400
+      );
+    }
+
+    if (family === "tron") {
+      const body = await parseJsonBodyOr400(
+        c,
+        CalculateTronFeesByPathBodySchema
+      );
+
+      if (!body.ok) {
+        return body.response;
+      }
+
+      const wallet = createDOClient(c, TRON_NETWORK_KEY);
+      const { address } = await wallet.registry().getAddress({
+        network: TRON_NETWORK_KEY,
+        path: pathResolution.path,
+      });
+      const result = await wallet.calculator().calculate({
+        from: address,
+        to: body.data.to,
+        amount: body.data.amount,
+        contract: body.data.contract,
+      });
+      return c.json(result, 200);
+    }
+
+    const body = await parseJsonBodyOr400(c, CalculateEvmFeesByChainBodySchema);
+
+    if (!body.ok) {
+      return body.response;
+    }
+
+    const config = resolveEvmNetworkByChainId(
+      body.data.chainId,
+      c.env.EVM_NETWORKS
+    );
+
+    if (!config) {
+      return c.json(
+        {
+          error: `Unknown chainId ${body.data.chainId}`,
+          availableChainIds: listEvmChainIds(c.env.EVM_NETWORKS),
+        },
+        400
+      );
+    }
+
+    const wallet = createDOClient(c, config.key);
+    const { address } = await wallet.registry().getAddress({
+      network: config.key,
+      path: pathResolution.path,
+    });
+    const result = await wallet.calculator().calculateEvm({
+      network: config.key,
+      from: address as `0x${string}`,
+      to: body.data.to,
+      amount: body.data.amount,
+      contract: body.data.contract,
+    });
+    return c.json(result, 200);
+  });
+
   // Tron routes are registered before the `:network` routes so the static
   // `/tron` prefix wins for Tron requests.
   app.post(
