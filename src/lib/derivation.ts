@@ -34,12 +34,12 @@ export type RawPathResult =
   | { ok: true; path: string }
   | { ok: false; error: string };
 
-// Parses URL segments like ["44h", "60h", "0h", "0", "5"] into the canonical
-// derivation path "m/44'/60'/0'/0/5". Hardening is strictly literal: a level
-// is hardened only when marked with ' or h/H — "/44/60/0" derives the fully
-// non-hardened key m/44/60/0. An optional leading "m" segment is accepted.
-// Spec-conformant clients percent-encode the separators of a single path
-// parameter (44h%2F60h%2F0h), so segments are re-split after decoding.
+// Parses URL segments like ["44", "60", "0", "0", "5"] into the canonical
+// derivation path "m/44/60/0/0/5". Raw paths are always non-hardened: plain
+// non-negative indexes only, hardening markers are rejected. An optional
+// leading "m" segment is accepted. Spec-conformant clients percent-encode the
+// separators of a single path parameter (44%2F60%2F0), so segments are
+// re-split after decoding.
 export function parseRawDerivationSegments(
   rawSegments: string[]
 ): RawPathResult {
@@ -78,12 +78,19 @@ export function parseRawDerivationSegments(
   const parts: string[] = [];
 
   for (const segment of segments) {
-    const match = /^(\d+)(['hH])?$/.exec(segment);
+    if (/^\d+['hH]$/.test(segment)) {
+      return {
+        ok: false,
+        error: `Invalid path segment "${segment}": hardened segments are not supported, use plain indexes`,
+      };
+    }
+
+    const match = /^(\d+)$/.exec(segment);
 
     if (!match) {
       return {
         ok: false,
-        error: `Invalid path segment "${segment}": expected an index with an optional ' or h hardening marker`,
+        error: `Invalid path segment "${segment}": expected a non-negative index`,
       };
     }
 
@@ -96,7 +103,7 @@ export function parseRawDerivationSegments(
       };
     }
 
-    parts.push(`${index}${match[2] ? "'" : ""}`);
+    parts.push(String(index));
   }
 
   return { ok: true, path: `m/${parts.join("/")}` };

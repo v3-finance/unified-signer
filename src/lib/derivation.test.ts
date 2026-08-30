@@ -86,35 +86,40 @@ describe("derivation helpers", () => {
 });
 
 describe("raw derivation paths", () => {
-  test("canonicalizes h and apostrophe hardening markers", () => {
-    expect(parseRawDerivationSegments(["44h", "60H", "0'", "0", "5"])).toEqual({
+  test("parses plain non-hardened segments", () => {
+    expect(parseRawDerivationSegments(["44", "60", "0", "0", "5"])).toEqual({
       ok: true,
-      path: "m/44'/60'/0'/0/5",
+      path: "m/44/60/0/0/5",
     });
   });
 
-  test("treats unmarked segments as non-hardened (literal semantics)", () => {
-    expect(parseRawDerivationSegments(["44", "60", "0"])).toEqual({
+  test("rejects hardening markers", () => {
+    const hMarker = parseRawDerivationSegments(["44h", "60", "0"]);
+    const apostrophe = parseRawDerivationSegments(["44'", "60", "0"]);
+
+    expect(hMarker.ok).toBe(false);
+    expect(apostrophe.ok).toBe(false);
+
+    if (!hMarker.ok) {
+      expect(hMarker.error).toContain("hardened segments are not supported");
+    }
+  });
+
+  test("accepts an optional leading m segment", () => {
+    expect(parseRawDerivationSegments(["m", "44", "60", "0"])).toEqual({
       ok: true,
       path: "m/44/60/0",
     });
   });
 
-  test("accepts an optional leading m segment", () => {
-    expect(parseRawDerivationSegments(["m", "44h", "60h", "0h"])).toEqual({
-      ok: true,
-      path: "m/44'/60'/0'",
-    });
-  });
-
   test("re-splits percent-encoded separators from a single segment", () => {
-    expect(parseRawDerivationSegments(["44h%2F60h%2F0h"])).toEqual({
+    expect(parseRawDerivationSegments(["44%2F60%2F0"])).toEqual({
       ok: true,
-      path: "m/44'/60'/0'",
+      path: "m/44/60/0",
     });
-    expect(parseRawDerivationSegments(["m%2F44h%2F60h", "0"])).toEqual({
+    expect(parseRawDerivationSegments(["m%2F44%2F60", "0"])).toEqual({
       ok: true,
-      path: "m/44'/60'/0",
+      path: "m/44/60/0",
     });
   });
 
@@ -129,15 +134,14 @@ describe("raw derivation paths", () => {
     ).toBe(false);
   });
 
-  test("field-based paths and raw paths derive identical keys", () => {
+  test("parsed raw paths derive keys directly by the same path", () => {
     const root = createDerivationRoot(mnemonic);
-    const raw = parseRawDerivationSegments(["44h", "60h", "0h", "0", "1", "2", "3"]);
+    const raw = parseRawDerivationSegments(["44", "60", "0", "0", "1", "2", "3"]);
 
     if (!raw.ok) throw new Error(raw.error);
 
-    expect(derivePrivateKeyFromPath(root, raw.path)).toBe(
-      derivePrivateKeyFromRoot(root, "evm", baseParams)
-    );
+    expect(raw.path).toBe("m/44/60/0/0/1/2/3");
+    expect(derivePrivateKeyFromPath(root, raw.path)).toHaveLength(64);
   });
 
   test("non-hardened raw path matches viem's independent HDKey implementation", () => {

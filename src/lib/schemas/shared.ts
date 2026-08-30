@@ -46,9 +46,11 @@ export const DecimalAmountSchema = z
   .regex(/^\d+(\.\d+)?$/, "Amount must be a positive decimal string")
   .refine((value) => Number(value) > 0, "Amount must be greater than 0");
 
-// Canonical derivation path as produced by buildDerivationPath /
-// parseRawDerivationSegments: "m/44'/60'/0'/0/5". Hardening markers are
-// apostrophes only; depth is capped at 10 levels.
+// Canonical derivation path for the DO contracts. Two producers feed it:
+// buildDerivationPath (legacy field scheme, hardened prefix "m/44'/60'/0'/...")
+// and parseRawDerivationSegments (raw URL paths, always non-hardened
+// "m/44/60/0/..."). Apostrophes are the only hardening notation; depth is
+// capped at 10 levels.
 export const DerivationPathSchema = z
   .string()
   .regex(/^m(\/\d+'?){1,10}$/, "Invalid derivation path")

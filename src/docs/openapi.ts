@@ -88,10 +88,10 @@ function createDerivationPathParameter() {
     in: "path",
     required: true,
     description:
-      "Raw derivation path as slash-separated segments, e.g. `44h/60h/0h/0/5`. Hardening is literal: only segments marked with `h` or `'` are hardened. 1-10 levels, indexes below 2^31; a leading `m` segment is optional.",
+      "Raw derivation path as slash-separated non-hardened indexes, e.g. `44/60/0/0/5`. Hardening markers are not supported. 1-10 levels, indexes below 2^31; a leading `m` segment is optional.",
     schema: {
       type: "string",
-      example: "44h/60h/0h/0/5",
+      example: "44/60/0/0/5",
     },
   };
 }
@@ -176,19 +176,19 @@ EVM-адрес одинаков во всех EVM-сетях для одного
 Помимо параметров \`appId/purpose/asset/stage/index\`, каждый эндпоинт доступен в варианте с сырым derivation-путём прямо в URL:
 
 \`\`\`
-GET  /wallet/address/44h/60h/0h            — адрес по пути (сеть выводится из coin type)
-GET  /{network}/wallet/address/44h/60h/0h
-GET  /{network}/wallet/balance/44h/60h/0h?contractAddress=...
-POST /{network}/transaction/44h/60h/0h
-POST /{network}/calculate/fees/44h/60h/0h  — from выводится из пути
+GET  /wallet/address/44/60/0               — адрес по пути (сеть выводится из coin type)
+GET  /{network}/wallet/address/44/60/0
+GET  /{network}/wallet/balance/44/60/0?contractAddress=...
+POST /{network}/transaction/44/60/0
+POST /{network}/calculate/fees/44/60/0     — from выводится из пути
 \`\`\`
 
 Правила:
 
-- Харденинг **строго по маркерам**: \`44h\` или \`44'\` — hardened, \`44\` без маркера — non-hardened. Путь \`/44/60/0\` даёт ключ \`m/44/60/0\`, а НЕ стандартный BIP44 \`m/44'/60'/0'\`
+- Сырые пути **всегда non-hardened**: сегменты — только числа, маркеры харденинга не поддерживаются. Путь \`/44/60/0\` даёт ключ \`m/44/60/0\` (не BIP44 \`m/44'/60'/0'\`)
 - Глубина пути: от 1 до 10 уровней, индексы < 2^31
 - Ведущий сегмент \`m\` опционален
-- Для BIP44-образных путей (первый уровень 44) coin type сверяется с семьёй сети: любой coin type, не совпадающий с семьёй (например \`44h/195h/...\` или \`44h/0h/...\` на EVM-эндпоинте), отклоняется с 400
+- Для BIP44-образных путей (первый уровень 44) coin type сверяется с семьёй сети: любой coin type, не совпадающий с семьёй (например \`44/195/...\` или \`44/0/...\` на EVM-эндпоинте), отклоняется с 400
 - Ответы path-эндпоинтов адреса дополнительно возвращают канонический \`path\`
 
 ## Денежные единицы
@@ -1000,10 +1000,10 @@ Returns the address for a raw derivation path, without picking a network explici
 
 The chain family is inferred from the BIP44 coin type in the path:
 
-- \`44h/60h/...\` — EVM (the address is identical across all configured EVM networks)
-- \`44h/195h/...\` — TRON
+- \`44/60/...\` — EVM (the address is identical across all configured EVM networks)
+- \`44/195/...\` — TRON
 
-Hardening is literal: only segments marked with \`h\` or \`'\` are hardened, so \`/44/60/0\` derives \`m/44/60/0\`, not \`m/44'/60'/0'\`. Paths whose family cannot be inferred are rejected — use the network-scoped variant for non-BIP44 paths.
+Raw paths are always non-hardened (\`/44/60/0\` derives \`m/44/60/0\`); hardening markers are not supported. Paths whose family cannot be inferred are rejected — use the network-scoped variant for non-BIP44 paths.
           `,
           operationId: "getWalletAddressByPath",
           parameters: [createDerivationPathParameter()],
@@ -1019,7 +1019,7 @@ Hardening is literal: only segments marked with \`h\` or \`'\` are hardened, so 
                     evm: {
                       value: {
                         address: EXAMPLE_EVM_ADDRESS,
-                        path: "m/44'/60'/0'/0/5",
+                        path: "m/44/60/0/0/5",
                       },
                     },
                   },
@@ -1028,7 +1028,7 @@ Hardening is literal: only segments marked with \`h\` or \`'\` are hardened, so 
             },
             "400": createErrorResponse(
               "Malformed path or family cannot be inferred.",
-              "Cannot infer the network family from this path. Use a BIP44-shaped path (44h/60h/... or 44h/195h/...) or the network-scoped endpoint /{network}/wallet/address/<path>."
+              "Cannot infer the network family from this path. Use a BIP44-shaped path (44/60/... or 44/195/...) or the network-scoped endpoint /{network}/wallet/address/<path>."
             ),
           },
         },
@@ -1040,7 +1040,7 @@ Hardening is literal: only segments marked with \`h\` or \`'\` are hardened, so 
           description: `
 Returns the address for a raw derivation path in the given network's format.
 
-Any path shape is accepted (BIP44 shape is not required), but a BIP44-shaped path whose coin type contradicts the network family (e.g. \`44h/195h/...\` on an EVM network) is rejected with 400.
+Any path shape is accepted (BIP44 shape is not required), but a BIP44-shaped path whose coin type contradicts the network family (e.g. \`44/195/...\` on an EVM network) is rejected with 400.
           `,
           operationId: "getWalletAddressByPathScoped",
           parameters: [
@@ -1138,7 +1138,7 @@ The request body matches the network family: TRON body with Base58 addresses und
                 },
                 examples: {
                   usdtOnBase: {
-                    summary: "ERC20 transfer from m/44'/60'/0'",
+                    summary: "ERC20 transfer from m/44/60/0",
                     value: {
                       to: EXAMPLE_EVM_RECIPIENT,
                       amount: "100.5",
@@ -1348,8 +1348,8 @@ The request body matches the network family: TRON body with Base58 addresses und
             path: {
               type: "string",
               description:
-                "Canonical derivation path with apostrophe hardening markers.",
-              example: "m/44'/60'/0'/0/5",
+                "Canonical non-hardened derivation path.",
+              example: "m/44/60/0/0/5",
             },
           },
         },

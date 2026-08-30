@@ -10,8 +10,8 @@ export type RawPathResolution =
   | { ok: false; response: Response };
 
 // Extracts and canonicalizes the raw derivation path that follows `prefix` in
-// the request URL, e.g. "/ethereum/transaction/" + "44h/60h/0h/0/5" ->
-// "m/44'/60'/0'/0/5". When `family` is given, a BIP44-shaped path whose coin
+// the request URL, e.g. "/ethereum/transaction/" + "44/60/0/0/5" ->
+// "m/44/60/0/0/5". When `family` is given, a BIP44-shaped path whose coin
 // type contradicts it is rejected — deriving a tron-branch key for an EVM
 // network is almost certainly a client mistake.
 export function extractRawDerivationPath(

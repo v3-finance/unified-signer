@@ -79,7 +79,7 @@ export function registerWalletRoutes(app: Hono<Env>) {
       return c.json(
         {
           error:
-            "Cannot infer the network family from this path. Use a BIP44-shaped path (44h/60h/... or 44h/195h/...) or the network-scoped endpoint /{network}/wallet/address/<path>.",
+            "Cannot infer the network family from this path. Use a BIP44-shaped path (44/60/... or 44/195/...) or the network-scoped endpoint /{network}/wallet/address/<path>.",
           path: resolution.path,
         },
         400
