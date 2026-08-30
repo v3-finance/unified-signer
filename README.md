@@ -35,6 +35,8 @@ The network is selected by the first path segment: `/{network}/...`.
 
 `feeType` selects the fee mode: `eip1559` (`maxFeePerGas`/`maxPriorityFeePerGas`) or `legacy` (`gasPrice`). Networks configured as `eip1559` automatically fall back to legacy pricing when the chain reports no base fee.
 
+The default configuration in `wrangler.jsonc` ships `ethereum`, `bsc`, `polygon`, and `base`. Adding another EVM chain is a config-only change: append an entry to `EVM_NETWORKS` and redeploy — no code changes required.
+
 ## Derivation
 
 All networks share one HD tree derived from one mnemonic:
