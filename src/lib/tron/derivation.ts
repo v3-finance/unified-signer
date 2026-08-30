@@ -1,15 +1,26 @@
 import type { BIP32Interface } from "bip32";
 import type { TronWeb } from "tronweb";
 import {
-  derivePrivateKeyFromRoot,
+  buildDerivationPath,
+  derivePrivateKeyFromPath,
   type WalletDerivationParams,
 } from "../derivation";
 
-export function deriveTronPrivateKeyFromRoot(
+export function deriveTronPrivateKeyFromPath(
   root: BIP32Interface,
-  params: WalletDerivationParams
+  path: string
 ): string {
-  return derivePrivateKeyFromRoot(root, "tron", params);
+  return derivePrivateKeyFromPath(root, path);
+}
+
+export function deriveTronAddressFromPath(
+  root: BIP32Interface,
+  tronWeb: TronWeb,
+  path: string
+): string {
+  return tronWeb.address.fromPrivateKey(
+    deriveTronPrivateKeyFromPath(root, path)
+  ) as string;
 }
 
 export function deriveTronAddressFromRoot(
@@ -17,7 +28,9 @@ export function deriveTronAddressFromRoot(
   tronWeb: TronWeb,
   params: WalletDerivationParams
 ): string {
-  return tronWeb.address.fromPrivateKey(
-    deriveTronPrivateKeyFromRoot(root, params)
-  ) as string;
+  return deriveTronAddressFromPath(
+    root,
+    tronWeb,
+    buildDerivationPath("tron", params)
+  );
 }

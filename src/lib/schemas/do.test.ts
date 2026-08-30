@@ -24,24 +24,31 @@ describe("durable object schemas", () => {
     ).toThrow();
   });
 
-  test("accepts valid tron signer payloads with purpose", () => {
+  test("accepts valid tron signer payloads with a derivation path", () => {
     const parsed = TronTxSignRequestSchema.parse({
-      appId: "1",
-      purpose: "2",
-      asset: "3",
-      stage: "4",
-      index: "5",
+      path: "m/44'/195'/1'/2/3/4/5",
       transaction: { raw_data: {} },
     });
 
     expect(parsed).toEqual({
-      appId: 1,
-      purpose: 2,
-      asset: 3,
-      stage: 4,
-      index: 5,
+      path: "m/44'/195'/1'/2/3/4/5",
       transaction: { raw_data: {} },
     });
+  });
+
+  test("rejects malformed derivation paths in signer payloads", () => {
+    expect(() =>
+      TronTxSignRequestSchema.parse({
+        path: "44/195/0",
+        transaction: { raw_data: {} },
+      })
+    ).toThrow();
+    expect(() =>
+      TronTxSignRequestSchema.parse({
+        path: "m/44h/195h/0h",
+        transaction: { raw_data: {} },
+      })
+    ).toThrow();
   });
 
   test("requires contractAddress for ERC20 transaction builds", () => {
@@ -70,11 +77,7 @@ describe("durable object schemas", () => {
 
   test("accepts a full evm sign payload", () => {
     const parsed = EvmTxSignRequestSchema.parse({
-      appId: 0,
-      purpose: 0,
-      asset: 0,
-      stage: 0,
-      index: 0,
+      path: "m/44'/60'/0'/0/0",
       transaction: {
         feeType: "eip1559",
         chainId: 1,
@@ -93,11 +96,7 @@ describe("durable object schemas", () => {
   test("rejects a sign payload mixing fee modes", () => {
     expect(() =>
       EvmTxSignRequestSchema.parse({
-        appId: 0,
-        purpose: 0,
-        asset: 0,
-        stage: 0,
-        index: 0,
+        path: "m/44'/60'/0'/0/0",
         transaction: {
           feeType: "legacy",
           chainId: 1,
@@ -114,20 +113,12 @@ describe("durable object schemas", () => {
   test("accepts registry balance queries for both families", () => {
     const tron = RegistryBalanceQuerySchema.parse({
       network: "tron",
-      appId: "0",
-      purpose: "0",
-      asset: "0",
-      stage: "0",
-      index: "0",
+      path: "m/44'/195'/0'/0/0/0/0",
       contractAddress: tronAddressA,
     });
     const evm = RegistryBalanceQuerySchema.parse({
       network: "ethereum",
-      appId: "0",
-      purpose: "0",
-      asset: "0",
-      stage: "0",
-      index: "0",
+      path: "m/44'/60'/0'/0/0/0/0",
       contractAddress: evmAddressA,
     });
 

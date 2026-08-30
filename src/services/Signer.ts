@@ -3,11 +3,11 @@ import type { BIP32Interface } from "bip32";
 import { z } from "zod";
 import { createDerivationRoot } from "../lib/derivation";
 import { publicErrorMessage } from "../lib/errors";
-import { deriveEvmPrivateKeyFromRoot } from "../lib/evm/derivation";
+import { deriveEvmPrivateKeyFromPath } from "../lib/evm/derivation";
 import { signEvmTransaction } from "../lib/evm/sign";
 import * as schemas from "../lib/schemas/do";
 import { createTronWeb } from "../lib/tron/client";
-import { deriveTronPrivateKeyFromRoot } from "../lib/tron/derivation";
+import { deriveTronPrivateKeyFromPath } from "../lib/tron/derivation";
 import { json } from "../lib/utils";
 
 type SignerEnv = {
@@ -27,7 +27,7 @@ export class Signer extends DurableObject<SignerEnv> {
 
   private async signTron(body: unknown): Promise<Response> {
     const parsed = schemas.TronTxSignRequestSchema.parse(body);
-    const privateKey = deriveTronPrivateKeyFromRoot(this.root, parsed);
+    const privateKey = deriveTronPrivateKeyFromPath(this.root, parsed.path);
     const transaction = parsed.transaction as Parameters<
       typeof this.tronWeb.trx.sign
     >[0];
@@ -42,7 +42,7 @@ export class Signer extends DurableObject<SignerEnv> {
 
   private async signEvm(body: unknown): Promise<Response> {
     const parsed = schemas.EvmTxSignRequestSchema.parse(body);
-    const privateKey = deriveEvmPrivateKeyFromRoot(this.root, parsed);
+    const privateKey = deriveEvmPrivateKeyFromPath(this.root, parsed.path);
     const rawTransaction = await signEvmTransaction(
       privateKey,
       parsed.transaction

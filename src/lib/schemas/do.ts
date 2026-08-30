@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   AnyAddressSchema,
   DecimalAmountSchema,
+  DerivationPathSchema,
   EvmAddressSchema,
   OptionalAnyContractAddressSchema,
   TronAddressSchema,
@@ -33,7 +34,8 @@ export const TronTxBuildResponseSchema = z.object({
   error: z.string().optional(),
 });
 
-export const TronTxSignRequestSchema = WalletDerivationFieldsSchema.extend({
+export const TronTxSignRequestSchema = z.object({
+  path: DerivationPathSchema,
   transaction: z.unknown(),
 });
 
@@ -69,7 +71,8 @@ export const EvmTxBuildResponseSchema = z.object({
   error: z.string().optional(),
 });
 
-export const EvmTxSignRequestSchema = WalletDerivationFieldsSchema.extend({
+export const EvmTxSignRequestSchema = z.object({
+  path: DerivationPathSchema,
   transaction: EvmUnsignedTxSchema,
 });
 
@@ -79,8 +82,9 @@ export const EvmTxSignResponseSchema = z.object({
   error: z.string().optional(),
 });
 
-export const RegistryAddressQuerySchema = WalletDerivationFieldsSchema.extend({
+export const RegistryAddressQuerySchema = z.object({
   network: z.string().min(1),
+  path: DerivationPathSchema,
 });
 
 export const RegistryBalanceQuerySchema = RegistryAddressQuerySchema.extend({

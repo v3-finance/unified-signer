@@ -48,6 +48,20 @@ EVM:  m/44'/60'/{appId}'/{purpose}/{asset}/{stage}/{index}
 
 The EVM address is identical across all configured EVM networks for the same derivation tuple.
 
+### Raw derivation paths
+
+Every endpoint also accepts a raw derivation path directly in the URL, as an alternative to the `appId/purpose/asset/stage/index` parameters:
+
+```
+GET  /wallet/address/44h/60h/0h            # family inferred from the coin type
+GET  /{network}/wallet/address/44h/60h/0h
+GET  /{network}/wallet/balance/44h/60h/0h?contractAddress=...
+POST /{network}/transaction/44h/60h/0h
+POST /{network}/calculate/fees/44h/60h/0h  # `from` is derived from the path
+```
+
+Hardening is strictly literal: only segments marked with `h` or `'` are hardened (`/44/60/0` derives the fully non-hardened `m/44/60/0`, not BIP44's `m/44'/60'/0'`). Paths are 1-10 levels deep with indexes below 2^31; a leading `m` segment is optional, and percent-encoded separators (`44h%2F60h%2F0h`) are accepted. On BIP44-shaped paths (first level 44) any coin type that differs from the network family is rejected with 400 (`44h/195h/...` or `44h/0h/...` on EVM endpoints, and vice versa).
+
 ## Architecture
 
 - `Registry` Durable Object derives addresses and reads balances.

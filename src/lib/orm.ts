@@ -54,7 +54,7 @@ export const DO_ROUTES = {
     },
   },
   REGISTRY: {
-    "/getAddressByIndex": {
+    "/getAddress": {
       method: "GET" as const,
       query: schemas.RegistryAddressQuerySchema,
       response: schemas.AddressResponseSchema,
@@ -259,10 +259,10 @@ export class RegistryClient extends BaseDOClient<"REGISTRY"> {
     super(c, "REGISTRY", instanceName, validate);
   }
 
-  async getAddressByIndex(
+  async getAddress(
     query: z.input<typeof schemas.RegistryAddressQuerySchema>
   ): Promise<z.infer<typeof schemas.AddressResponseSchema>> {
-    return this.call("/getAddressByIndex", { query });
+    return this.call("/getAddress", { query });
   }
 
   async getBalance(

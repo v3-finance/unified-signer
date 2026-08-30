@@ -21,6 +21,20 @@ export const CreateEvmTransactionBodySchema = z.object({
   gasFree: z.boolean().default(false),
 });
 
+// Fee-calculation bodies for the raw-path endpoints: `from` is derived from
+// the URL path instead of being passed explicitly.
+export const CalculateTronFeesByPathBodySchema = z.object({
+  to: TronAddressSchema,
+  amount: DecimalAmountSchema,
+  contract: TronAddressSchema.optional(),
+});
+
+export const CalculateEvmFeesByPathBodySchema = z.object({
+  to: EvmAddressSchema,
+  amount: DecimalAmountSchema,
+  contract: EvmAddressSchema.optional(),
+});
+
 export type CreateTronTransactionBody = z.infer<
   typeof CreateTronTransactionBodySchema
 >;

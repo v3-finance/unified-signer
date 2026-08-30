@@ -45,6 +45,18 @@ describe("wallet query schemas", () => {
     });
   });
 
+  test("rejects derivation fields at or above 2^31", () => {
+    expect(() =>
+      WalletDerivationQuerySchema.parse({
+        appId: "0",
+        purpose: "0",
+        asset: "0",
+        stage: "0",
+        index: "2147483648",
+      })
+    ).toThrow();
+  });
+
   test("rejects legacy purpuse alias", () => {
     expect(() =>
       WalletDerivationQuerySchema.parse({

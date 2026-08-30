@@ -16,7 +16,7 @@ function createWalletQueryParameters() {
       required: true,
       description:
         "Application identifier inside the HD wallet tree. Use it to isolate addresses between products or business domains.",
-      schema: { type: "integer", minimum: 0, example: 0 },
+      schema: { type: "integer", minimum: 0, maximum: 2147483647, example: 0 },
     },
     {
       name: "purpose",
@@ -24,7 +24,7 @@ function createWalletQueryParameters() {
       required: true,
       description:
         "Derivation purpose within the application. Typical convention: `0` for hot payout wallets, `1` for deposit wallets.",
-      schema: { type: "integer", minimum: 0, example: 0 },
+      schema: { type: "integer", minimum: 0, maximum: 2147483647, example: 0 },
     },
     {
       name: "asset",
@@ -32,7 +32,7 @@ function createWalletQueryParameters() {
       required: true,
       description:
         "Asset branch in the derivation tree. The numeric meaning is defined by your own application, for example `0 = USDT`, `1 = USDC`.",
-      schema: { type: "integer", minimum: 0, example: 0 },
+      schema: { type: "integer", minimum: 0, maximum: 2147483647, example: 0 },
     },
     {
       name: "stage",
@@ -40,14 +40,14 @@ function createWalletQueryParameters() {
       required: true,
       description:
         "Additional derivation branch used to segment wallet groups, environments, or account families.",
-      schema: { type: "integer", minimum: 0, example: 0 },
+      schema: { type: "integer", minimum: 0, maximum: 2147483647, example: 0 },
     },
     {
       name: "index",
       in: "query",
       required: true,
       description: "Concrete wallet index inside the selected derivation branch.",
-      schema: { type: "integer", minimum: 0, example: 0 },
+      schema: { type: "integer", minimum: 0, maximum: 2147483647, example: 0 },
     },
   ];
 }
@@ -63,6 +63,35 @@ function createEvmNetworkPathParameter(evmNetworks: EvmNetworkConfig[]) {
       type: "string",
       enum: evmNetworks.map((network) => network.key),
       example: evmNetworks[0]?.key ?? "ethereum",
+    },
+  };
+}
+
+function createAnyNetworkPathParameter(evmNetworks: EvmNetworkConfig[]) {
+  return {
+    name: "anyNetwork",
+    in: "path",
+    required: true,
+    description:
+      "Network key: `tron` or any configured EVM network. Addresses in the request/response follow this network's format.",
+    schema: {
+      type: "string",
+      enum: [TRON_NETWORK_KEY, ...evmNetworks.map((network) => network.key)],
+      example: TRON_NETWORK_KEY,
+    },
+  };
+}
+
+function createDerivationPathParameter() {
+  return {
+    name: "path",
+    in: "path",
+    required: true,
+    description:
+      "Raw derivation path as slash-separated segments, e.g. `44h/60h/0h/0/5`. Hardening is literal: only segments marked with `h` or `'` are hardened. 1-10 levels, indexes below 2^31; a leading `m` segment is optional.",
+    schema: {
+      type: "string",
+      example: "44h/60h/0h/0/5",
     },
   };
 }
@@ -141,6 +170,26 @@ EVM:  m/44'/60'/{appId}'/{purpose}/{asset}/{stage}/{index}
 \`\`\`
 
 EVM-адрес одинаков во всех EVM-сетях для одного набора derivation-параметров. Все числа целые и неотрицательные. Семантика \`purpose\`, \`asset\` и \`stage\` определяется вашим приложением.
+
+## Сырые derivation-пути
+
+Помимо параметров \`appId/purpose/asset/stage/index\`, каждый эндпоинт доступен в варианте с сырым derivation-путём прямо в URL:
+
+\`\`\`
+GET  /wallet/address/44h/60h/0h            — адрес по пути (сеть выводится из coin type)
+GET  /{network}/wallet/address/44h/60h/0h
+GET  /{network}/wallet/balance/44h/60h/0h?contractAddress=...
+POST /{network}/transaction/44h/60h/0h
+POST /{network}/calculate/fees/44h/60h/0h  — from выводится из пути
+\`\`\`
+
+Правила:
+
+- Харденинг **строго по маркерам**: \`44h\` или \`44'\` — hardened, \`44\` без маркера — non-hardened. Путь \`/44/60/0\` даёт ключ \`m/44/60/0\`, а НЕ стандартный BIP44 \`m/44'/60'/0'\`
+- Глубина пути: от 1 до 10 уровней, индексы < 2^31
+- Ведущий сегмент \`m\` опционален
+- Для BIP44-образных путей (первый уровень 44) coin type сверяется с семьёй сети: любой coin type, не совпадающий с семьёй (например \`44h/195h/...\` или \`44h/0h/...\` на EVM-эндпоинте), отклоняется с 400
+- Ответы path-эндпоинтов адреса дополнительно возвращают канонический \`path\`
 
 ## Денежные единицы
 
@@ -942,6 +991,258 @@ Use this endpoint when:
           },
         },
       },
+      "/wallet/address/{path}": {
+        get: {
+          tags: ["Wallet"],
+          summary: "Derive an address by raw derivation path",
+          description: `
+Returns the address for a raw derivation path, without picking a network explicitly.
+
+The chain family is inferred from the BIP44 coin type in the path:
+
+- \`44h/60h/...\` — EVM (the address is identical across all configured EVM networks)
+- \`44h/195h/...\` — TRON
+
+Hardening is literal: only segments marked with \`h\` or \`'\` are hardened, so \`/44/60/0\` derives \`m/44/60/0\`, not \`m/44'/60'/0'\`. Paths whose family cannot be inferred are rejected — use the network-scoped variant for non-BIP44 paths.
+          `,
+          operationId: "getWalletAddressByPath",
+          parameters: [createDerivationPathParameter()],
+          responses: {
+            "200": {
+              description: "Derived address with the canonical path.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/WalletAddressByPathResponse",
+                  },
+                  examples: {
+                    evm: {
+                      value: {
+                        address: EXAMPLE_EVM_ADDRESS,
+                        path: "m/44'/60'/0'/0/5",
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            "400": createErrorResponse(
+              "Malformed path or family cannot be inferred.",
+              "Cannot infer the network family from this path. Use a BIP44-shaped path (44h/60h/... or 44h/195h/...) or the network-scoped endpoint /{network}/wallet/address/<path>."
+            ),
+          },
+        },
+      },
+      "/{anyNetwork}/wallet/address/{path}": {
+        get: {
+          tags: ["Wallet"],
+          summary: "Derive an address by raw derivation path (network-scoped)",
+          description: `
+Returns the address for a raw derivation path in the given network's format.
+
+Any path shape is accepted (BIP44 shape is not required), but a BIP44-shaped path whose coin type contradicts the network family (e.g. \`44h/195h/...\` on an EVM network) is rejected with 400.
+          `,
+          operationId: "getWalletAddressByPathScoped",
+          parameters: [
+            createAnyNetworkPathParameter(evmNetworks),
+            createDerivationPathParameter(),
+          ],
+          responses: {
+            "200": {
+              description: "Derived address with the canonical path.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/WalletAddressByPathResponse",
+                  },
+                },
+              },
+            },
+            "400": createErrorResponse(
+              "Malformed path or coin type conflicts with the network family.",
+              "Derivation path coin type does not match the evm network family"
+            ),
+            "404": createErrorResponse(
+              "Unknown network key.",
+              'Unknown network "goerli"'
+            ),
+          },
+        },
+      },
+      "/{anyNetwork}/wallet/balance/{path}": {
+        get: {
+          tags: ["Wallet"],
+          summary: "Get a wallet balance by raw derivation path",
+          description:
+            "Same as the query-parameter balance endpoint, but the wallet is addressed by a raw derivation path. Add `contractAddress` as a query parameter for token balances.",
+          operationId: "getWalletBalanceByPath",
+          parameters: [
+            createAnyNetworkPathParameter(evmNetworks),
+            createDerivationPathParameter(),
+            {
+              name: "contractAddress",
+              in: "query",
+              required: false,
+              description:
+                "Token contract address (TRC20 for tron, ERC20 for EVM networks).",
+              schema: { type: "string" },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Wallet balance in smallest units.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/WalletBalanceResponse" },
+                },
+              },
+            },
+            "400": createErrorResponse(
+              "Malformed path, coin type conflict, or invalid contract address.",
+              "Validation Error"
+            ),
+            "404": createErrorResponse(
+              "Unknown network key.",
+              'Unknown network "goerli"'
+            ),
+          },
+        },
+      },
+      "/{anyNetwork}/transaction/{path}": {
+        post: {
+          tags: ["Transaction"],
+          summary: "Build, sign and broadcast a transaction by raw derivation path",
+          description: `
+Same execution flow as the query-parameter transaction endpoint, but the sending wallet is addressed by a raw derivation path.
+
+The request body matches the network family: TRON body with Base58 addresses under \`/tron/transaction/{path}\`, EVM body with 0x addresses under any configured EVM network.
+          `,
+          operationId: "createTransactionByPath",
+          parameters: [
+            createAnyNetworkPathParameter(evmNetworks),
+            createDerivationPathParameter(),
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  oneOf: [
+                    {
+                      $ref: "#/components/schemas/CreateTronTransactionRequest",
+                    },
+                    {
+                      $ref: "#/components/schemas/CreateEvmTransactionRequest",
+                    },
+                  ],
+                },
+                examples: {
+                  usdtOnBase: {
+                    summary: "ERC20 transfer from m/44'/60'/0'",
+                    value: {
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "100.5",
+                      contractAddress: USDT_ETHEREUM_CONTRACT,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description: "Transaction accepted by the network.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/CreateTransactionResponse",
+                  },
+                },
+              },
+            },
+            "400": createErrorResponse(
+              "Malformed path, validation, balance or build/sign failure.",
+              "Insufficient ERC20 balance"
+            ),
+            "404": createErrorResponse(
+              "Unknown network key.",
+              'Unknown network "goerli"'
+            ),
+            "502": {
+              description: "Broadcast was not accepted by the network.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/BroadcastErrorResponse" },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/{anyNetwork}/calculate/fees/{path}": {
+        post: {
+          tags: ["Fees"],
+          summary: "Calculate transaction fees by raw derivation path",
+          description:
+            "Same as the fee-calculation endpoint, but `from` is derived from the raw path instead of being passed in the body. The body contains only `to`, `amount` and optionally `contract`.",
+          operationId: "calculateFeesByPath",
+          parameters: [
+            createAnyNetworkPathParameter(evmNetworks),
+            createDerivationPathParameter(),
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/CalculateFeesByPathRequest",
+                },
+                examples: {
+                  evm: {
+                    value: {
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "100",
+                      contract: USDT_ETHEREUM_CONTRACT,
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Fee calculation result (TRON or EVM shape).",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [
+                      { $ref: "#/components/schemas/TronCalculateFeesResponse" },
+                      { $ref: "#/components/schemas/EvmCalculateFeesResponse" },
+                    ],
+                  },
+                },
+              },
+            },
+            "400": {
+              description: "Malformed path or validation failure.",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [
+                      { $ref: "#/components/schemas/ErrorResponse" },
+                      { $ref: "#/components/schemas/ValidationErrorResponse" },
+                    ],
+                  },
+                },
+              },
+            },
+            "404": createErrorResponse(
+              "Unknown network key.",
+              'Unknown network "goerli"'
+            ),
+          },
+        },
+      },
     },
     components: {
       schemas: {
@@ -1030,6 +1331,42 @@ Use this endpoint when:
                 { $ref: "#/components/schemas/EvmAddress" },
               ],
               description: "Derived wallet address in the network's format.",
+            },
+          },
+        },
+        WalletAddressByPathResponse: {
+          type: "object",
+          required: ["address", "path"],
+          properties: {
+            address: {
+              oneOf: [
+                { $ref: "#/components/schemas/TronAddress" },
+                { $ref: "#/components/schemas/EvmAddress" },
+              ],
+              description: "Derived wallet address in the network's format.",
+            },
+            path: {
+              type: "string",
+              description:
+                "Canonical derivation path with apostrophe hardening markers.",
+              example: "m/44'/60'/0'/0/5",
+            },
+          },
+        },
+        CalculateFeesByPathRequest: {
+          type: "object",
+          required: ["to", "amount"],
+          properties: {
+            to: {
+              type: "string",
+              description:
+                "Recipient address in the network's format (Base58 for tron, 0x hex for EVM).",
+            },
+            amount: { $ref: "#/components/schemas/AmountString" },
+            contract: {
+              type: "string",
+              description:
+                "Optional token contract address. If omitted, the calculation is for a native transfer.",
             },
           },
         },

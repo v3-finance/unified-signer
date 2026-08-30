@@ -6,7 +6,7 @@ import { z } from "zod";
 import { createDerivationRoot } from "../lib/derivation";
 import { publicErrorMessage } from "../lib/errors";
 import { createEvmClient } from "../lib/evm/client";
-import { deriveEvmAddressFromRoot } from "../lib/evm/derivation";
+import { deriveEvmAddressFromPath } from "../lib/evm/derivation";
 import {
   resolveNetwork,
   type EvmNetworkConfig,
@@ -15,9 +15,8 @@ import {
 import * as schemas from "../lib/schemas/do";
 import { EvmAddressSchema, TronAddressSchema } from "../lib/schemas/shared";
 import { createTronWeb } from "../lib/tron/client";
-import { deriveTronAddressFromRoot } from "../lib/tron/derivation";
+import { deriveTronAddressFromPath } from "../lib/tron/derivation";
 import { json } from "../lib/utils";
-import type { WalletDerivationParams } from "../lib/derivation";
 
 type RegistryEnv = {
   mnemonic: string;
@@ -58,15 +57,12 @@ export class Registry extends DurableObject<RegistryEnv> {
     return client;
   }
 
-  private getAddress(
-    network: NetworkRef,
-    params: WalletDerivationParams
-  ): string {
+  private getAddress(network: NetworkRef, path: string): string {
     if (network.family === "tron") {
-      return deriveTronAddressFromRoot(this.root, this.tronWeb, params);
+      return deriveTronAddressFromPath(this.root, this.tronWeb, path);
     }
 
-    return deriveEvmAddressFromRoot(this.root, params);
+    return deriveEvmAddressFromPath(this.root, path);
   }
 
   private toBigIntSafe(value: unknown): bigint {
@@ -160,19 +156,15 @@ export class Registry extends DurableObject<RegistryEnv> {
     const url = new URL(req.url);
 
     try {
-      if (req.method === "GET" && url.pathname === "/getAddressByIndex") {
+      if (req.method === "GET" && url.pathname === "/getAddress") {
         const query = schemas.RegistryAddressQuerySchema.parse({
           network: url.searchParams.get("network"),
-          appId: url.searchParams.get("appId"),
-          purpose: url.searchParams.get("purpose"),
-          asset: url.searchParams.get("asset"),
-          stage: url.searchParams.get("stage"),
-          index: url.searchParams.get("index"),
+          path: url.searchParams.get("path"),
         });
 
         const network = this.resolveNetworkOrThrow(query.network);
         const response = schemas.AddressResponseSchema.parse({
-          address: this.getAddress(network, query),
+          address: this.getAddress(network, query.path),
         });
         return json(response);
       }
@@ -180,16 +172,12 @@ export class Registry extends DurableObject<RegistryEnv> {
       if (req.method === "GET" && url.pathname === "/getBalance") {
         const query = schemas.RegistryBalanceQuerySchema.parse({
           network: url.searchParams.get("network"),
-          appId: url.searchParams.get("appId"),
-          purpose: url.searchParams.get("purpose"),
-          asset: url.searchParams.get("asset"),
-          stage: url.searchParams.get("stage"),
-          index: url.searchParams.get("index"),
+          path: url.searchParams.get("path"),
           contractAddress: url.searchParams.get("contractAddress"),
         });
 
         const network = this.resolveNetworkOrThrow(query.network);
-        const address = this.getAddress(network, query);
+        const address = this.getAddress(network, query.path);
 
         const balance =
           network.family === "tron"

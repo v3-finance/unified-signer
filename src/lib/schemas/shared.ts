@@ -3,6 +3,12 @@ import { z } from "zod";
 
 export const NonNegativeIntSchema = z.coerce.number().int().nonnegative();
 
+// BIP32 child indexes are 31-bit; values >= 2^31 only "worked" before via
+// bip32's silent hardened-equivalence and are rejected explicitly now.
+export const DerivationIndexSchema = NonNegativeIntSchema.pipe(
+  z.number().max(0x7fffffff)
+);
+
 export const TRON_ADDRESS_PATTERN = /^T[A-Za-z0-9]{33}$/;
 export const EVM_ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 
@@ -40,12 +46,27 @@ export const DecimalAmountSchema = z
   .regex(/^\d+(\.\d+)?$/, "Amount must be a positive decimal string")
   .refine((value) => Number(value) > 0, "Amount must be greater than 0");
 
+// Canonical derivation path as produced by buildDerivationPath /
+// parseRawDerivationSegments: "m/44'/60'/0'/0/5". Hardening markers are
+// apostrophes only; depth is capped at 10 levels.
+export const DerivationPathSchema = z
+  .string()
+  .regex(/^m(\/\d+'?){1,10}$/, "Invalid derivation path")
+  .refine(
+    (value) =>
+      value
+        .split("/")
+        .slice(1)
+        .every((segment) => Number.parseInt(segment, 10) < 0x80000000),
+    "Derivation path index out of range"
+  );
+
 export const WalletDerivationFieldsSchema = z.object({
-  appId: NonNegativeIntSchema,
-  purpose: NonNegativeIntSchema,
-  asset: NonNegativeIntSchema,
-  stage: NonNegativeIntSchema,
-  index: NonNegativeIntSchema,
+  appId: DerivationIndexSchema,
+  purpose: DerivationIndexSchema,
+  asset: DerivationIndexSchema,
+  stage: DerivationIndexSchema,
+  index: DerivationIndexSchema,
 });
 
 export const WalletDerivationQuerySchema = WalletDerivationFieldsSchema;
