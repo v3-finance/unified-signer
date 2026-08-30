@@ -9,7 +9,6 @@ import {
   derivePrivateKeyFromRoot,
   inferFamilyFromPath,
   parseRawDerivationSegments,
-  pathFamilyConflict,
 } from "./derivation";
 import { deriveEvmAddressFromRoot } from "./evm/derivation";
 
@@ -163,14 +162,4 @@ describe("raw derivation paths", () => {
     expect(inferFamilyFromPath("m/60")).toBeUndefined();
   });
 
-  test("flags any BIP44 coin type that differs from the network family", () => {
-    expect(pathFamilyConflict("m/44'/195'/0'", "evm")).toBe(true);
-    expect(pathFamilyConflict("m/44'/60'/0'", "tron")).toBe(true);
-    expect(pathFamilyConflict("m/44'/0'/0'", "evm")).toBe(true);
-    expect(pathFamilyConflict("m/44'/0'/0'", "tron")).toBe(true);
-    expect(pathFamilyConflict("m/44'/60'/0'", "evm")).toBe(false);
-    expect(pathFamilyConflict("m/44'/195'/0'", "tron")).toBe(false);
-    expect(pathFamilyConflict("m/0/1/2", "evm")).toBe(false);
-    expect(pathFamilyConflict("m/44", "evm")).toBe(false);
-  });
 });

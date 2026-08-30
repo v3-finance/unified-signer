@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  EvmCalculateDoRequestSchema,
   EvmUnsignedTxSchema,
   evmCalculateResponseSchema,
-  evmCalculateSchema,
 } from "./evm";
 
 const addressA = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
@@ -11,7 +11,8 @@ const addressB = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
 describe("evm fee calculation schemas", () => {
   test("rejects the same sender and recipient", () => {
     expect(() =>
-      evmCalculateSchema.parse({
+      EvmCalculateDoRequestSchema.parse({
+        network: "ethereum",
         from: addressA,
         to: addressA,
         amount: "1",
@@ -21,7 +22,8 @@ describe("evm fee calculation schemas", () => {
 
   test("rejects contract collisions with sender or recipient", () => {
     expect(() =>
-      evmCalculateSchema.parse({
+      EvmCalculateDoRequestSchema.parse({
+        network: "ethereum",
         from: addressA,
         to: addressB,
         amount: "1",
@@ -32,7 +34,8 @@ describe("evm fee calculation schemas", () => {
 
   test("compares addresses after checksum normalization", () => {
     expect(() =>
-      evmCalculateSchema.parse({
+      EvmCalculateDoRequestSchema.parse({
+        network: "ethereum",
         from: addressA.toLowerCase(),
         to: addressA,
         amount: "1",

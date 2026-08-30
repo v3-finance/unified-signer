@@ -1,26 +1,6 @@
 import type { Context } from "hono";
-import type { z, ZodError } from "zod";
+import type { z } from "zod";
 import type { Env } from "../env";
-
-// Default zValidator failures return a raw ZodError dump; this hook produces
-// the documented `{error: "Validation Error", details}` shape instead.
-// The context is typed loosely because zValidator's Hook type is
-// contravariant in the context parameter.
-export function validationHook(
-  result: { success: boolean; error?: unknown },
-  c: Context<any, string>
-) {
-  if (!result.success) {
-    const error = result.error as ZodError | undefined;
-    return c.json(
-      {
-        error: "Validation Error",
-        details: error?.issues ?? [],
-      },
-      400
-    );
-  }
-}
 
 // Manual body validation for endpoints whose schema depends on runtime state
 // (e.g. the chain family inferred from the URL path); mirrors validationHook's

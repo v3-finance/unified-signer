@@ -3,12 +3,6 @@ import { z } from "zod";
 
 export const NonNegativeIntSchema = z.coerce.number().int().nonnegative();
 
-// BIP32 child indexes are 31-bit; values >= 2^31 only "worked" before via
-// bip32's silent hardened-equivalence and are rejected explicitly now.
-export const DerivationIndexSchema = NonNegativeIntSchema.pipe(
-  z.number().max(0x7fffffff)
-);
-
 export const TRON_ADDRESS_PATTERN = /^T[A-Za-z0-9]{33}$/;
 export const EVM_ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 
@@ -63,16 +57,6 @@ export const DerivationPathSchema = z
     "Derivation path index out of range"
   );
 
-export const WalletDerivationFieldsSchema = z.object({
-  appId: DerivationIndexSchema,
-  purpose: DerivationIndexSchema,
-  asset: DerivationIndexSchema,
-  stage: DerivationIndexSchema,
-  index: DerivationIndexSchema,
-});
-
-export const WalletDerivationQuerySchema = WalletDerivationFieldsSchema;
-
 function optionalContractAddress<Schema extends z.ZodTypeAny>(schema: Schema) {
   return z
     .union([schema, z.literal(""), z.literal("undefined"), z.null()])
@@ -91,14 +75,3 @@ export const OptionalEvmContractAddressSchema =
 export const OptionalAnyContractAddressSchema =
   optionalContractAddress(AnyAddressSchema);
 
-export const TronWalletBalanceQuerySchema = WalletDerivationFieldsSchema.extend({
-  contractAddress: OptionalTronContractAddressSchema,
-});
-
-export const EvmWalletBalanceQuerySchema = WalletDerivationFieldsSchema.extend({
-  contractAddress: OptionalEvmContractAddressSchema,
-});
-
-export type WalletDerivationParams = z.infer<typeof WalletDerivationFieldsSchema>;
-export type TronWalletBalanceQuery = z.infer<typeof TronWalletBalanceQuerySchema>;
-export type EvmWalletBalanceQuery = z.infer<typeof EvmWalletBalanceQuerySchema>;

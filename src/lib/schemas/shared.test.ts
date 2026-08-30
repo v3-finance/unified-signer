@@ -1,72 +1,45 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DerivationPathSchema,
   EvmAddressSchema,
-  EvmWalletBalanceQuerySchema,
-  TronWalletBalanceQuerySchema,
-  WalletDerivationQuerySchema,
+  OptionalEvmContractAddressSchema,
+  OptionalTronContractAddressSchema,
 } from "./shared";
 
-describe("wallet query schemas", () => {
-  test("accepts canonical purpose field", () => {
-    const parsed = WalletDerivationQuerySchema.parse({
-      appId: "1",
-      purpose: "2",
-      asset: "3",
-      stage: "4",
-      index: "5",
-    });
-
-    expect(parsed).toEqual({
-      appId: 1,
-      purpose: 2,
-      asset: 3,
-      stage: 4,
-      index: 5,
-    });
+describe("optional contract address schemas", () => {
+  test("normalizes empty and placeholder values to undefined", () => {
+    expect(OptionalTronContractAddressSchema.parse("undefined")).toBeUndefined();
+    expect(OptionalTronContractAddressSchema.parse("")).toBeUndefined();
+    expect(OptionalTronContractAddressSchema.parse(null)).toBeUndefined();
+    expect(OptionalTronContractAddressSchema.parse(undefined)).toBeUndefined();
   });
 
-  test("normalizes optional contractAddress values", () => {
-    const parsed = TronWalletBalanceQuerySchema.parse({
-      appId: "1",
-      purpose: "2",
-      asset: "3",
-      stage: "4",
-      index: "5",
-      contractAddress: "undefined",
-    });
+  test("passes valid contract addresses through", () => {
+    expect(
+      OptionalTronContractAddressSchema.parse(
+        "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+      )
+    ).toBe("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t");
+    expect(
+      OptionalEvmContractAddressSchema.parse(
+        "0xdac17f958d2ee523a2206206994597c13d831ec7"
+      )
+    ).toBe("0xdAC17F958D2ee523a2206206994597C13D831ec7");
+  });
+});
 
-    expect(parsed).toEqual({
-      appId: 1,
-      purpose: 2,
-      asset: 3,
-      stage: 4,
-      index: 5,
-      contractAddress: undefined,
-    });
+describe("derivation path schema", () => {
+  test("accepts canonical hardened and non-hardened paths", () => {
+    expect(DerivationPathSchema.parse("m/44/60/0")).toBe("m/44/60/0");
+    expect(DerivationPathSchema.parse("m/44'/195'/0'/0/0")).toBe(
+      "m/44'/195'/0'/0/0"
+    );
   });
 
-  test("rejects derivation fields at or above 2^31", () => {
-    expect(() =>
-      WalletDerivationQuerySchema.parse({
-        appId: "0",
-        purpose: "0",
-        asset: "0",
-        stage: "0",
-        index: "2147483648",
-      })
-    ).toThrow();
-  });
-
-  test("rejects legacy purpuse alias", () => {
-    expect(() =>
-      WalletDerivationQuerySchema.parse({
-        appId: "1",
-        purpuse: "2",
-        asset: "3",
-        stage: "4",
-        index: "5",
-      })
-    ).toThrow();
+  test("rejects malformed and out-of-range paths", () => {
+    expect(() => DerivationPathSchema.parse("44/60/0")).toThrow();
+    expect(() => DerivationPathSchema.parse("m/44h/60h")).toThrow();
+    expect(() => DerivationPathSchema.parse("m/2147483648")).toThrow();
   });
 });
 
@@ -94,20 +67,5 @@ describe("evm address schema", () => {
     expect(() =>
       EvmAddressSchema.parse("TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9")
     ).toThrow();
-  });
-
-  test("normalizes optional evm contract addresses in queries", () => {
-    const parsed = EvmWalletBalanceQuerySchema.parse({
-      appId: "0",
-      purpose: "0",
-      asset: "0",
-      stage: "0",
-      index: "0",
-      contractAddress: "0xdac17f958d2ee523a2206206994597c13d831ec7",
-    });
-
-    expect(parsed.contractAddress).toBe(
-      "0xdAC17F958D2ee523a2206206994597C13D831ec7"
-    );
   });
 });

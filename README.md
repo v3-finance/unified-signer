@@ -4,18 +4,37 @@ Cloudflare Workers API for deterministic wallet derivation, fee estimation, and 
 
 ## What it does
 
-- Derives TRON and EVM addresses from a single mnemonic using a fixed HD path per chain family.
+- Derives TRON and EVM addresses from a single mnemonic by a raw derivation path in the URL.
 - Reads native (TRX, ETH, BNB, ...) and token (TRC20 / ERC20) balances.
 - Estimates transaction costs before sending: bandwidth/energy for TRON, gas for EVM.
 - Builds, signs, and broadcasts transactions in every configured network.
 - Exposes a compact OpenAPI document at `/doc` and a Markdown version at `/llms.txt`.
 
+## API surface
+
+Four endpoints plus docs. The wallet is addressed by a derivation path in the URL; the chain family comes from the path's coin type (`44/60/...` — EVM, `44/195/...` — TRON), and the concrete EVM network is selected by `chainId`:
+
+```
+GET  /wallet/address/{path}
+GET  /wallet/balance/{path}?chainId=1[&contractAddress=...]
+POST /transaction/{path}          # {"chainId": 1, ...} in the body for EVM
+POST /calculate/fees/{path}       # `from` is derived from the path
+GET  /  /doc  /llms.txt           # Scalar UI, OpenAPI JSON, Markdown docs
+```
+
+TRON paths need no `chainId`; an unknown `chainId` returns 400 with the configured `availableChainIds`.
+
+## Derivation paths
+
+All keys derive from one mnemonic by the path given in the URL:
+
+- Paths are **always non-hardened**: segments are plain indexes, hardening markers (`h`/`'`) are rejected. `/44/60/0` derives `m/44/60/0`.
+- 1-10 levels, indexes below 2^31; a leading `m` segment is optional; percent-encoded separators (`44%2F60%2F0`) are accepted.
+- The first level must be `44` and the second the coin type: `60` (EVM) or `195` (TRON); anything else is rejected with 400.
+- Deeper levels are your own structure, e.g. `/44/60/{purpose}/{userId}`.
+- The EVM address is identical across all configured EVM networks for the same path.
+
 ## Networks
-
-The network is selected by the first path segment: `/{network}/...`.
-
-- `tron` — the TRON network via TronGrid.
-- Any other key — an EVM network from the `EVM_NETWORKS` configuration.
 
 `EVM_NETWORKS` is a JSON array of network definitions:
 
@@ -35,44 +54,12 @@ The network is selected by the first path segment: `/{network}/...`.
 
 `feeType` selects the fee mode: `eip1559` (`maxFeePerGas`/`maxPriorityFeePerGas`) or `legacy` (`gasPrice`). Networks configured as `eip1559` automatically fall back to legacy pricing when the chain reports no base fee.
 
-The default configuration in `wrangler.jsonc` ships `ethereum`, `bsc`, `polygon`, and `base`. Adding another EVM chain is a config-only change: append an entry to `EVM_NETWORKS` and redeploy — no code changes required.
-
-## Derivation
-
-All networks share one HD tree derived from one mnemonic:
-
-```
-TRON: m/44'/195'/{appId}'/{purpose}/{asset}/{stage}/{index}
-EVM:  m/44'/60'/{appId}'/{purpose}/{asset}/{stage}/{index}
-```
-
-The EVM address is identical across all configured EVM networks for the same derivation tuple.
-
-### Raw derivation paths
-
-Every endpoint also accepts a raw derivation path directly in the URL, as an alternative to the `appId/purpose/asset/stage/index` parameters:
-
-```
-# Global — the family comes from the coin type (44/60 = EVM, 44/195 = TRON);
-# for EVM the concrete network is selected by chainId (query param or body field)
-GET  /wallet/address/44/60/0
-GET  /wallet/balance/44/60/0?chainId=8453
-POST /transaction/44/60/0                  # {"chainId": 8453, ...} in the body
-POST /calculate/fees/44/60/0               # `from` is derived from the path
-
-# Network-scoped
-GET  /{network}/wallet/address/44/60/0
-GET  /{network}/wallet/balance/44/60/0?contractAddress=...
-POST /{network}/transaction/44/60/0
-POST /{network}/calculate/fees/44/60/0
-```
-
-Raw paths are always non-hardened: segments are plain indexes, hardening markers (`h`/`'`) are not supported and rejected. `/44/60/0` derives `m/44/60/0` (not BIP44's hardened `m/44'/60'/0'`). Paths are 1-10 levels deep with indexes below 2^31; a leading `m` segment is optional, and percent-encoded separators (`44%2F60%2F0`) are accepted. On BIP44-shaped paths (first level 44) any coin type that differs from the network family is rejected with 400 (`44/195/...` or `44/0/...` on EVM endpoints, and vice versa).
+The default configuration in `wrangler.jsonc` ships `ethereum` (1), `bsc` (56), `polygon` (137), and `base` (8453). Adding another EVM chain is a config-only change: append an entry to `EVM_NETWORKS` and redeploy — no code changes required. TRON runs via TronGrid (`TRONGRID_BASE_URL`).
 
 ## Architecture
 
 - `Registry` Durable Object derives addresses and reads balances.
-- `TxBuilder` Durable Object builds TRON and EVM transactions.
+- `TxBuilder` Durable Object builds TRON and EVM transactions; for EVM it reserves nonces in DO storage so concurrent sends from one address do not collide.
 - `Signer` Durable Object signs transactions directly from the mnemonic without exposing private keys.
 - `GasCalculator` Durable Object estimates fees.
 - Worker routes in `src/routes` provide the public HTTP API.
@@ -81,8 +68,9 @@ Raw paths are always non-hardened: segments are plain indexes, hardening markers
 
 - The public API does not expose the mnemonic or raw private keys.
 - Transactions are signed inside the `Signer` Durable Object.
-- TRC20/ERC20 amount handling is decimal-aware; token decimals are read from the contract.
+- TRC20/ERC20 amount handling is decimal-aware; token decimals are read from the contract and read failures are never cached.
 - Mixed-case EVM addresses are validated against the EIP-55 checksum.
+- Authentication is expected to be enforced in front of the worker (Cloudflare Access).
 
 ## Development
 
@@ -129,149 +117,93 @@ wrangler secret put mnemonic
 
 ## API cookbook
 
-Every request variant, grouped by task. `$BASE_URL` is your deployment URL. Two addressing schemes exist everywhere: derivation query parameters (hardened tree) and raw non-hardened paths — see [Derivation](#derivation). Responses shown are shapes, not live values.
+`$BASE_URL` is your deployment URL. Responses shown are shapes, not live values.
 
 ### Addresses
 
 ```bash
-# By derivation parameters (hardened tree m/44'/coin'/appId'/purpose/asset/stage/index)
-curl "$BASE_URL/tron/wallet/address?appId=0&purpose=0&asset=0&stage=0&index=0"
-curl "$BASE_URL/ethereum/wallet/address?appId=0&purpose=0&asset=0&stage=0&index=0"
-```
-
-```bash
-# By raw path (non-hardened), network-scoped
-curl "$BASE_URL/tron/wallet/address/44/195/0"
-curl "$BASE_URL/base/wallet/address/44/60/0"
-```
-
-```bash
-# By raw path, no network: the family is inferred from the coin type (60 = EVM, 195 = TRON)
+# EVM address (identical across all EVM networks)
 curl "$BASE_URL/wallet/address/44/60/0"
 ```
 
-Responses: `{"address": "..."}` for the query scheme, `{"address": "...", "path": "m/44/60/0"}` for path endpoints. The EVM address is identical across all EVM networks for the same path/tuple.
+```bash
+# TRON address
+curl "$BASE_URL/wallet/address/44/195/0"
+```
+
+Response: `{"address": "0x...", "path": "m/44/60/0"}`.
 
 ### Balances
 
 Returned in smallest units (SUN / wei / token base units), as strings.
 
 ```bash
-# Native coin
-curl "$BASE_URL/tron/wallet/balance?appId=0&purpose=0&asset=0&stage=0&index=0"
-curl "$BASE_URL/ethereum/wallet/balance?appId=0&purpose=0&asset=0&stage=0&index=0"
-```
-
-```bash
-# Token (TRC20 / ERC20) — add contractAddress
-curl "$BASE_URL/tron/wallet/balance?appId=0&purpose=0&asset=0&stage=0&index=0&contractAddress=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
-curl "$BASE_URL/ethereum/wallet/balance?appId=0&purpose=0&asset=0&stage=0&index=0&contractAddress=0xdAC17F958D2ee523a2206206994597C13D831ec7"
-```
-
-```bash
-# Same by raw path (network-scoped)
-curl "$BASE_URL/base/wallet/balance/44/60/0"
-curl "$BASE_URL/base/wallet/balance/44/60/0?contractAddress=0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"
-```
-
-```bash
-# Global by raw path: EVM network via the chainId query parameter, TRON paths need none
-curl "$BASE_URL/wallet/balance/44/60/0?chainId=8453"
+# Native coin: TRON needs no chainId, EVM selects the network by chainId
 curl "$BASE_URL/wallet/balance/44/195/0"
+curl "$BASE_URL/wallet/balance/44/60/0?chainId=8453"
+```
+
+```bash
+# Token (TRC20 / ERC20) — add contractAddress (the token contract differs per network)
+curl "$BASE_URL/wallet/balance/44/195/0?contractAddress=TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+curl "$BASE_URL/wallet/balance/44/60/0?chainId=1&contractAddress=0xdAC17F958D2ee523a2206206994597C13D831ec7"
 ```
 
 Response: `{"asset": "TRX" | "ETH" | "<contract>", "value": "15000000"}`.
 
 ### Transactions
 
-One endpoint per network; the body decides native vs token. `amount` is always a decimal string in the asset's own units — token decimals are read from the contract. Success: `201 {"txId": "...", "fee": "0.000315"}` (`fee` is a decimal string in the native coin, `"0"` when `gasFree`).
+One endpoint; the body decides native vs token, `chainId` picks the EVM network. `amount` is always a decimal string in the asset's own units — token decimals are read from the contract. Success: `201 {"txId": "...", "fee": "0.000315"}` (`fee` is a decimal string in the native coin, `"0"` when `gasFree`).
 
 ```bash
-# Global endpoint (recommended): family from the path's coin type, EVM network via chainId in the body
+# ETH on Base
 curl -X POST "$BASE_URL/transaction/44/60/0" \
   -H "Content-Type: application/json" \
   -d '{"chainId": 8453, "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "0.05"}'
 ```
 
 ```bash
-# Global endpoint, TRON path — no chainId needed
+# USDT on Ethereum
+curl -X POST "$BASE_URL/transaction/44/60/0" \
+  -H "Content-Type: application/json" \
+  -d '{"chainId": 1, "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "100.5", "contractAddress": "0xdAC17F958D2ee523a2206206994597C13D831ec7"}'
+```
+
+```bash
+# TRX — no chainId
 curl -X POST "$BASE_URL/transaction/44/195/0" \
   -H "Content-Type: application/json" \
   -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "1.5"}'
 ```
 
 ```bash
-# Native transfers (network-scoped, derivation parameters)
-curl -X POST "$BASE_URL/tron/transaction?appId=0&purpose=0&asset=0&stage=0&index=0" \
-  -H "Content-Type: application/json" \
-  -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "1.5"}'
-```
-
-```bash
-curl -X POST "$BASE_URL/ethereum/transaction?appId=0&purpose=0&asset=0&stage=0&index=0" \
-  -H "Content-Type: application/json" \
-  -d '{"to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "0.05"}'
-```
-
-```bash
-# Token transfers — the token contract differs per network (USDT shown)
-curl -X POST "$BASE_URL/tron/transaction?appId=0&purpose=0&asset=0&stage=0&index=0" \
-  -H "Content-Type: application/json" \
-  -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "100.5", "contractAddress": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}'
-```
-
-```bash
-curl -X POST "$BASE_URL/base/transaction?appId=0&purpose=0&asset=0&stage=0&index=0" \
-  -H "Content-Type: application/json" \
-  -d '{"to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "100.5", "contractAddress": "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"}'
-```
-
-```bash
-# Skip the fee pre-check (delegated TRON energy/bandwidth, or you accept the gas risk)
-curl -X POST "$BASE_URL/tron/transaction?appId=0&purpose=0&asset=0&stage=0&index=0" \
+# USDT on TRON with delegated energy — skip the fee pre-check
+curl -X POST "$BASE_URL/transaction/44/195/0" \
   -H "Content-Type: application/json" \
   -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "100.5", "contractAddress": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "gasFree": true}'
 ```
 
-```bash
-# By raw path — same bodies, wallet addressed by the URL
-curl -X POST "$BASE_URL/ethereum/transaction/44/60/0" \
-  -H "Content-Type: application/json" \
-  -d '{"to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "0.05"}'
-```
-
 ### Fees (no broadcast)
 
-```bash
-# Explicit `from` in the body
-curl -X POST "$BASE_URL/tron/calculate/fees" \
-  -H "Content-Type: application/json" \
-  -d '{"from": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "to": "TUdbkixK7zU4ua7YC2oNz6ujsfZxb98GFb", "amount": "1.5"}'
-```
+`from` is derived from the path; the body carries only `to`, `amount`, optionally `contract`, and `chainId` for EVM.
 
 ```bash
-curl -X POST "$BASE_URL/ethereum/calculate/fees" \
-  -H "Content-Type: application/json" \
-  -d '{"from": "0xF977814e90dA44bFA03b6295A0616a897441aceC", "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "0.05", "contract": "0xdAC17F958D2ee523a2206206994597C13D831ec7"}'
-```
-
-```bash
-# `from` derived from the raw path; body has only to/amount/contract
-curl -X POST "$BASE_URL/tron/calculate/fees/44/195/0" \
+curl -X POST "$BASE_URL/calculate/fees/44/195/0" \
   -H "Content-Type: application/json" \
   -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "1.5"}'
 ```
 
 ```bash
-# Global: `from` from the path, EVM network via chainId in the body
 curl -X POST "$BASE_URL/calculate/fees/44/60/0" \
   -H "Content-Type: application/json" \
-  -d '{"chainId": 1, "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "0.05"}'
+  -d '{"chainId": 1, "to": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", "amount": "100", "contract": "0xdAC17F958D2ee523a2206206994597C13D831ec7"}'
 ```
 
-Note: EVM fee estimation simulates the transfer via `estimateGas`, so `from` must actually hold the transferred asset; otherwise the RPC revert is returned as a 400.
+Note: EVM fee estimation simulates the transfer via `estimateGas`, so the derived wallet must actually hold the transferred asset; otherwise the RPC revert is returned as a 400.
 
 ### Recipes
+
+**Deposit address per user.** Dedicate a path level to the purpose and use the user id as the last index — addresses are deterministic, no address database needed: `GET /wallet/address/44/195/1/<userId>`.
 
 **Send the whole balance.** Fees are paid on top of `amount`:
 
@@ -279,24 +211,20 @@ Note: EVM fee estimation simulates the transfer via `estimateGas`, so `from` mus
 - TRON native: `amount = balance − fee − 1 SUN` (strict comparisons require 1 SUN of headroom)
 - Tokens: send the full token balance as is — fees are paid in the native coin
 
-**Fee preview before sending.** Call `/calculate/fees`, show the quote, then `POST /transaction`. The transaction endpoint re-checks everything itself, so the preview call is optional.
-
-**Deposit address per user.** Addresses are deterministic — no address database needed. Convention: `purpose=1` for deposits, `index` = user id: `GET /tron/wallet/address?appId=0&purpose=1&asset=0&stage=0&index=<userId>`.
+**Fee preview before sending.** Call `/calculate/fees/{path}`, show the quote, then `POST /transaction/{path}`. The transaction endpoint re-checks everything itself, so the preview call is optional.
 
 ### Error reference
 
 | Status | Body | Meaning |
 |---|---|---|
-| 400 | `{"error": "Validation Error", "details": [...]}` | Invalid parameters, addresses, checksum |
-| 400 | `{"success": false, "error": {"message", "issues"}}` | `/calculate/fees` body validation |
+| 400 | `{"error": "Validation Error", "details": [...]}` | Invalid body/query: addresses, checksum, missing chainId field |
+| 400 | `{"error": "Unknown chainId ...", "availableChainIds": [...]}` | chainId does not match any configured EVM network |
+| 400 | `{"error": "Invalid path segment ..."}` | Malformed derivation path (non-numeric segment, hardening marker, depth, range) |
+| 400 | `{"error": "Cannot infer the network family ..."}` | Path does not start with 44/60 or 44/195 |
 | 400 | `{"error": "Too many decimal places (max N)"}` | `amount` more precise than the asset's decimals |
 | 400 | `{"error": "Insufficient ... balance", "shortfallSun"/"shortfallWei"/"shortfall"}` | Not enough native coin or token |
 | 400 | `{"error": "Insufficient ... to cover amount and fees", "feeSun"/"feeWei"}` | Amount fits, amount + fee does not |
 | 400 | `{"error": "Unable to read token contract", "message"}` | `contractAddress` is not a readable token |
-| 400 | `{"error": "Invalid path segment ..."}` | Malformed raw derivation path |
-| 400 | `{"error": "Derivation path coin type does not match ..."}` | BIP44 coin type contradicts the network family |
-| 400 | `{"error": "Unknown chainId ...", "availableChainIds": [...]}` | chainId does not match any configured EVM network |
 | 400 | `{"ok": false, "error": "..."}` | Build/sign/estimate rejected by the chain (bad base58, estimateGas revert, ...) |
-| 404 | `{"error": "Unknown network ...", "availableNetworks": [...]}` | Unknown network key |
 | 502 | `{"error": "Failed to broadcast transaction", "details"}` | The network refused the signed transaction |
 | 500 | `{"error": "Internal Server Error"}` | Upstream RPC/TronGrid failure; details in worker logs |

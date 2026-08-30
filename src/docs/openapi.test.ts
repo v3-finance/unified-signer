@@ -23,59 +23,61 @@ const evmNetworks = [
 ];
 
 describe("openapi document", () => {
-  test("documents purpose without the legacy alias", () => {
-    const document = createOpenApiDocument("https://signer.example", evmNetworks);
-    const parameters = document.paths["/tron/wallet/address"].get.parameters;
-    const purposeParameter = parameters.find(
-      (parameter) => parameter.name === "purpose"
-    );
-
-    expect(purposeParameter?.description).toContain("purpose");
-    expect(JSON.stringify(document)).not.toContain("purpuse");
-  });
-
-  test("includes transaction endpoints for both families", () => {
+  test("documents exactly the global endpoint surface", () => {
     const document = createOpenApiDocument("https://signer.example", evmNetworks);
 
-    expect(document.paths["/tron/transaction"].post.summary).toBe(
-      "Build, sign and broadcast a TRON transaction"
-    );
-    expect(document.paths["/{network}/transaction"].post.summary).toBe(
-      "Build, sign and broadcast an EVM transaction"
+    expect(Object.keys(document.paths).sort()).toEqual(
+      [
+        "/",
+        "/doc",
+        "/llms.txt",
+        "/wallet/address/{path}",
+        "/wallet/balance/{path}",
+        "/transaction/{path}",
+        "/calculate/fees/{path}",
+      ].sort()
     );
   });
 
-  test("exposes configured evm networks in the path parameter", () => {
-    const document = createOpenApiDocument("https://signer.example", evmNetworks);
-    const networkParameter = document.paths[
-      "/{network}/wallet/address"
-    ].get.parameters.find((parameter) => parameter.name === "network");
-
-    expect(networkParameter?.schema).toMatchObject({
-      enum: ["ethereum", "bsc"],
-    });
-  });
-
-  test("documents both derivation trees", () => {
-    const document = createOpenApiDocument("https://signer.example", evmNetworks);
-
-    expect(document.info.description).toContain("m/44'/195'");
-    expect(document.info.description).toContain("m/44'/60'");
-    expect(document.info.description).toContain("`tron`, `ethereum`, `bsc`");
-  });
-
-  test("does not document monitoring or webhook routes", () => {
+  test("does not document removed network-prefixed or monitoring routes", () => {
     const document = createOpenApiDocument("https://signer.example", evmNetworks);
     const paths = Object.keys(document.paths);
 
+    expect(paths.some((path) => path.includes("{network}"))).toBe(false);
+    expect(paths.some((path) => path.startsWith("/tron/"))).toBe(false);
     expect(paths.some((path) => path.includes("monitor"))).toBe(false);
     expect(paths.some((path) => path.includes("webhook"))).toBe(false);
   });
 
-  test("includes evm fee calculation schemas", () => {
+  test("exposes configured chain ids in the transaction body schema", () => {
+    const document = createOpenApiDocument("https://signer.example", evmNetworks);
+    const byChainRequest =
+      document.components.schemas.CreateEvmTransactionByChainRequest;
+
+    expect(byChainRequest.properties.chainId.enum).toEqual([1, 56]);
+    expect(
+      document.components.schemas.CalculateFeesByChainRequest.properties
+        .chainId.enum
+    ).toEqual([1, 56]);
+  });
+
+  test("describes non-hardened paths and both coin types", () => {
     const document = createOpenApiDocument("https://signer.example", evmNetworks);
 
-    expect(document.components.schemas.EvmCalculateFeesResponse).toBeDefined();
+    expect(document.info.description).toContain("non-hardened");
+    expect(document.info.description).toContain("44/60");
+    expect(document.info.description).toContain("44/195");
+    expect(document.info.description).toContain("chainId");
+    expect(document.info.description).toContain("`tron`, `ethereum`, `bsc`");
+  });
+
+  test("keeps fee response schemas for both families", () => {
+    const document = createOpenApiDocument("https://signer.example", evmNetworks);
+
     expect(document.components.schemas.TronCalculateFeesResponse).toBeDefined();
+    expect(document.components.schemas.EvmCalculateFeesResponse).toBeDefined();
+    expect(
+      document.paths["/transaction/{path}"].post.summary.length
+    ).toBeGreaterThan(0);
   });
 });
