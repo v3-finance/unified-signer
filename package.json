@@ -1,0 +1,29 @@
+{
+  "name": "unified-signer",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "wrangler types --env-interface CloudflareBindings && bunx tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run test",
+    "deploy": "wrangler deploy --minify",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+  },
+  "dependencies": {
+    "@bitcoinerlab/secp256k1": "^1.2.0",
+    "@hono/zod-validator": "^0.7.3",
+    "@scalar/hono-api-reference": "^0.9.21",
+    "@scalar/openapi-to-markdown": "^0.2.44",
+    "bip32": "^5.0.0",
+    "bip39": "^3.1.0",
+    "hono": "^4.9.10",
+    "tronweb": "^6.0.4",
+    "viem": "^2.38.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.4.0"
+  }
+}

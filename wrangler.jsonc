@@ -1,0 +1,40 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "unified-signer",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-12",
+  "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  "vars": {
+    "TRONGRID_BASE_URL": "https://api.trongrid.io",
+    "EVM_NETWORKS": "[{\"key\":\"ethereum\",\"name\":\"Ethereum\",\"chainId\":1,\"rpcUrl\":\"https://ethereum-rpc.publicnode.com\",\"nativeSymbol\":\"ETH\",\"nativeDecimals\":18,\"feeType\":\"eip1559\"},{\"key\":\"bsc\",\"name\":\"BNB Smart Chain\",\"chainId\":56,\"rpcUrl\":\"https://bsc-rpc.publicnode.com\",\"nativeSymbol\":\"BNB\",\"nativeDecimals\":18,\"feeType\":\"legacy\"},{\"key\":\"polygon\",\"name\":\"Polygon\",\"chainId\":137,\"rpcUrl\":\"https://polygon-bor-rpc.publicnode.com\",\"nativeSymbol\":\"POL\",\"nativeDecimals\":18,\"feeType\":\"eip1559\"}]"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TX_BUILDER",
+        "class_name": "TxBuilder"
+      },
+      {
+        "name": "REGISTRY",
+        "class_name": "Registry"
+      },
+      {
+        "name": "SIGNER",
+        "class_name": "Signer"
+      },
+      {
+        "name": "GAS_CALCULATOR",
+        "class_name": "GasCalculator"
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "do-v1.0",
+      "new_sqlite_classes": ["TxBuilder", "Registry", "Signer", "GasCalculator"],
+    },
+  ],
+  "observability": {
+    "enabled": true,
+  }
+}
