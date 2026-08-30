@@ -5,6 +5,7 @@ const TRON_ADDRESS_PATTERN = "^T[A-Za-z0-9]{33}$";
 const EVM_ADDRESS_PATTERN = "^0x[a-fA-F0-9]{40}$";
 const USDT_TRON_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
 const USDT_ETHEREUM_CONTRACT = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+const USDT_BASE_CONTRACT = "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2";
 const EXAMPLE_EVM_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
 const EXAMPLE_EVM_RECIPIENT = "0x8ba1f109551bD432803012645Ac136ddd64DBA72";
 
@@ -137,70 +138,143 @@ API для детерминированного управления кошел�
 
 ## Что умеет API
 
-- Получать адреса кошельков из общего HD-дерева по набору derivation-параметров
+- Получать адреса кошельков из общего HD-дерева по набору derivation-параметров или по сырому пути
 - Читать балансы нативных монет (TRX, ETH, BNB, ...) и токенов (TRC20 / ERC20)
 - Рассчитывать стоимость транзакции до отправки: bandwidth/energy для TRON, gas для EVM
 - Строить, подписывать и отправлять транзакции в любой сконфигурированной сети
 
-## Сети
+## Быстрая карта API
 
-Сеть выбирается первым сегментом пути: \`/{network}/...\`.
+| Запрос | Что делает |
+|---|---|
+| \`GET /{network}/wallet/address?appId&purpose&asset&stage&index\` | Адрес по derivation-параметрам |
+| \`GET /{network}/wallet/address/{path}\` | Адрес по сырому пути |
+| \`GET /wallet/address/{path}\` | Адрес по пути без указания сети (семья выводится из coin type) |
+| \`GET /{network}/wallet/balance?...[&contractAddress]\` | Баланс нативной монеты или токена |
+| \`GET /{network}/wallet/balance/{path}[?contractAddress]\` | То же по сырому пути |
+| \`POST /{network}/transaction?...\` | Перевод: проверки балансов → комиссия → build → sign → broadcast |
+| \`POST /{network}/transaction/{path}\` | То же по сырому пути |
+| \`POST /{network}/calculate/fees\` | Расчёт комиссии без отправки (\`from\` в теле) |
+| \`POST /{network}/calculate/fees/{path}\` | То же, \`from\` выводится из пути |
+| \`GET /\`, \`GET /doc\`, \`GET /llms.txt\` | Документация: Scalar UI, OpenAPI JSON, Markdown |
 
 Доступные сети этого деплоя: ${networkList}.
 
 - \`tron\` — сеть TRON поверх TronGrid
-- Остальные ключи — EVM-сети из конфигурации \`EVM_NETWORKS\` (chainId, RPC URL, нативная монета, режим комиссий)
+- Остальные ключи — EVM-сети из конфигурации \`EVM_NETWORKS\` (chainId, RPC URL, нативная монета, режим комиссий). Добавление сети — только конфиг, без кода
 
-## Архитектура
+## Два способа адресовать кошелёк
 
-Сервис использует Durable Objects, разделяя обязанности по четырём зонам:
-
-- \`Registry\` отвечает за derivation адресов и балансы
-- \`TxBuilder\` строит TRON и EVM транзакции
-- \`Signer\` подписывает транзакции, не раскрывая приватные ключи наружу
-- \`GasCalculator\` оценивает стоимость исполнения
-
-## Derivation path
-
-Все сети используют одно HD-дерево из одной mnemonic:
+**1. Derivation-параметры** (\`appId/purpose/asset/stage/index\`) — структурированная схема поверх hardened-дерева:
 
 \`\`\`
 TRON: m/44'/195'/{appId}'/{purpose}/{asset}/{stage}/{index}
 EVM:  m/44'/60'/{appId}'/{purpose}/{asset}/{stage}/{index}
 \`\`\`
 
-EVM-адрес одинаков во всех EVM-сетях для одного набора derivation-параметров. Все числа целые и неотрицательные. Семантика \`purpose\`, \`asset\` и \`stage\` определяется вашим приложением.
+Все числа целые, от 0 до 2^31−1. Семантика уровней определяется вашим приложением; типичная конвенция: \`purpose=0\` — hot/payout кошельки, \`purpose=1\` — депозитные, \`index\` — идентификатор пользователя.
 
-## Сырые derivation-пути
+**2. Сырой derivation-путь** прямо в URL: \`/44/60/0\`, \`/44/195/0/0/7\` и т.п. Правила:
 
-Помимо параметров \`appId/purpose/asset/stage/index\`, каждый эндпоинт доступен в варианте с сырым derivation-путём прямо в URL:
-
-\`\`\`
-GET  /wallet/address/44/60/0               — адрес по пути (сеть выводится из coin type)
-GET  /{network}/wallet/address/44/60/0
-GET  /{network}/wallet/balance/44/60/0?contractAddress=...
-POST /{network}/transaction/44/60/0
-POST /{network}/calculate/fees/44/60/0     — from выводится из пути
-\`\`\`
-
-Правила:
-
-- Сырые пути **всегда non-hardened**: сегменты — только числа, маркеры харденинга не поддерживаются. Путь \`/44/60/0\` даёт ключ \`m/44/60/0\` (не BIP44 \`m/44'/60'/0'\`)
-- Глубина пути: от 1 до 10 уровней, индексы < 2^31
-- Ведущий сегмент \`m\` опционален
+- Сырые пути **всегда non-hardened**: сегменты — только числа, маркеры харденинга (\`h\`, \`'\`) не поддерживаются и отклоняются. Путь \`/44/60/0\` даёт ключ \`m/44/60/0\` (не BIP44 \`m/44'/60'/0'\`)
+- Глубина от 1 до 10 уровней, индексы < 2^31, ведущий сегмент \`m\` опционален, percent-кодирование разделителей (\`44%2F60%2F0\`) допустимо
 - Для BIP44-образных путей (первый уровень 44) coin type сверяется с семьёй сети: любой coin type, не совпадающий с семьёй (например \`44/195/...\` или \`44/0/...\` на EVM-эндпоинте), отклоняется с 400
 - Ответы path-эндпоинтов адреса дополнительно возвращают канонический \`path\`
+
+**Важно:** две схемы адресуют РАЗНЫЕ ветки дерева (hardened против non-hardened) — \`?appId=0&...&index=0\` и \`/44/60/0/0/0/0/0\` дают разные адреса. Выберите одну схему и придерживайтесь её.
+
+## Сценарии использования
+
+### Депозитный адрес для пользователя N
+
+Одна и та же пара запросов на любую сеть; адрес детерминирован — БД для соответствия «пользователь → адрес» не обязательна:
+
+\`\`\`
+GET ${baseUrl}/tron/wallet/address?appId=0&purpose=1&asset=0&stage=0&index=42
+GET ${baseUrl}/ethereum/wallet/address?appId=0&purpose=1&asset=0&stage=0&index=42
+\`\`\`
+
+### Один EVM-адрес во всех EVM-сетях
+
+Для одного пути/набора параметров адрес в ethereum, bsc, polygon, base идентичен. Достаточно спросить любую EVM-сеть или глобальный эндпоинт:
+
+\`\`\`
+GET ${baseUrl}/wallet/address/44/60/42
+\`\`\`
+
+### Полный флоу вывода средств
+
+1. Баланс токена: \`GET /{network}/wallet/balance?...&contractAddress=<token>\`
+2. Баланс нативной монеты (хватит ли на комиссию): \`GET /{network}/wallet/balance?...\`
+3. Предпросмотр комиссии для UI: \`POST /{network}/calculate/fees\` (опционально — шаг 4 сам всё проверит)
+4. Отправка: \`POST /{network}/transaction?...\` с телом \`{"to", "amount", "contractAddress"}\`
+
+Ответ шага 4: \`201 {"txId": "...", "fee": "0.000315"}\`. Любая проблема (нехватка баланса, невалидный адрес, отказ сети) вернётся понятной ошибкой ДО отправки — сервис не бросает транзакцию в сеть, пока все проверки не пройдены.
+
+### Отправить весь баланс
+
+Комиссия платится сверх суммы, поэтому «отправить всё» = баланс минус комиссия:
+
+- EVM: \`amount = balance − totalFeeWei\` (из \`/calculate/fees\`; равенство допустимо). \`totalFeeWei\` — потолок, фактическая комиссия обычно ниже, остаток пыли нормален
+- TRON: \`amount = balance − fee − 1 SUN\` (строгие сравнения требуют минимум 1 SUN сверху)
+- Токены: отправляется весь баланс токена как есть — комиссия платится нативной монетой
+
+### TRC20 при делегированных ресурсах (gasFree)
+
+Если energy/bandwidth делегированы кошельку, проверка «хватит ли TRX на комиссию» не нужна — добавьте \`"gasFree": true\` в тело \`/transaction\`. Проверка комиссии пропускается, \`fee\` в ответе — \`"0"\`. Работает и для EVM (пропуск предпроверки; параметры газа всё равно применяются к транзакции).
+
+### Работа полностью по сырым путям
+
+Все операции доступны по пути — без derivation-параметров:
+
+\`\`\`
+GET  ${baseUrl}/wallet/address/44/60/7
+GET  ${baseUrl}/base/wallet/balance/44/60/7
+POST ${baseUrl}/base/transaction/44/60/7          {"to": "0x...", "amount": "0.05"}
+POST ${baseUrl}/base/calculate/fees/44/60/7       {"to": "0x...", "amount": "0.05"}
+\`\`\`
 
 ## Денежные единицы
 
 - Балансы возвращаются в минимальных единицах: SUN для TRX (\`1 TRX = 1_000_000 SUN\`), wei для нативных EVM-монет, базовые единицы для токенов
-- В request body суммы передаются десятичной строкой (например \`"1.5"\`), а не числом
-- \`fee\` в ответе \`/transaction\` — десятичная строка в нативной монете сети
+- В request body суммы передаются десятичной строкой (например \`"1.5"\`), а не числом; decimals токена сервис читает из контракта сам
+- Число дробных знаков не должно превышать decimals актива (6 для TRX, 18 для ETH, decimals токена), иначе 400
+- \`fee\` в ответе \`/transaction\` — десятичная строка в нативной монете сети (\`"0"\` при \`gasFree\`)
+
+## Справочник ошибок
+
+| Код | Тело | Когда |
+|---|---|---|
+| 400 | \`{"error": "Validation Error", "details": [...]}\` | Невалидные параметры, адреса, checksum, сырой путь в query/body |
+| 400 | \`{"success": false, "error": {"message", "issues"}}\` | Ошибка валидации тела \`/calculate/fees\` |
+| 400 | \`{"error": "Too many decimal places (max N)"}\` | Слишком много дробных знаков в \`amount\` |
+| 400 | \`{"error": "Insufficient TRX balance", "shortfallSun"}\` | Не хватает TRX на сумму |
+| 400 | \`{"error": "Insufficient <SYMBOL> balance", "shortfallWei"}\` | Не хватает нативной EVM-монеты на сумму |
+| 400 | \`{"error": "Insufficient TRC20/ERC20 balance", "shortfall", "token", "decimals"}\` | Не хватает токена |
+| 400 | \`{"error": "Insufficient ... to cover amount and fees", "feeSun"/"feeWei"}\` | Сумма проходит, сумма+комиссия — нет |
+| 400 | \`{"error": "Unable to read token contract", "message"}\` | \`contractAddress\` — не читаемый токен-контракт |
+| 400 | \`{"error": "Invalid path segment ..."}\` | Ошибка в сыром пути (не число, маркер харденинга, глубина, диапазон) |
+| 400 | \`{"error": "Derivation path coin type does not match ..."}\` | Coin type пути противоречит семье сети |
+| 400 | \`{"ok": false, "error": "..."}\` | Отказ построения/подписи/оценки на стороне сети (невалидный base58, revert estimateGas и т.п.) |
+| 404 | \`{"error": "Unknown network ...", "availableNetworks": [...]}\` | Неизвестный ключ сети |
+| 502 | \`{"error": "Failed to broadcast transaction", "details"}\` | Сеть не приняла подписанную транзакцию |
+| 500 | \`{"error": "Internal Server Error"}\` | Сбой апстрима (RPC/TronGrid недоступен, rate limit); детали в логах воркера |
+
+## Архитектура
+
+Сервис использует Durable Objects, разделяя обязанности по четырём зонам:
+
+- \`Registry\` отвечает за derivation адресов и балансы
+- \`TxBuilder\` строит TRON и EVM транзакции; для EVM резервирует nonce в хранилище DO — параллельные отправки с одного адреса не конфликтуют
+- \`Signer\` подписывает транзакции, не раскрывая приватные ключи наружу
+- \`GasCalculator\` оценивает стоимость исполнения
 
 ## Безопасность
 
-- API не раскрывает mnemonic и приватные ключи
-- Подпись транзакции выполняется внутри \`Signer\` Durable Object
+- API не раскрывает mnemonic и приватные ключи; подпись выполняется внутри \`Signer\` Durable Object
+- Смешанный регистр EVM-адресов проверяется по EIP-55 checksum
+- Decimals токенов читаются строго из контракта; ошибки чтения не кэшируются
+- Аутентификация выполняется на уровне Cloudflare (Access) перед воркером
 
 ## Интерактивная документация
 
@@ -464,6 +538,16 @@ Important notes:
                       to: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
                       amount: "100.5",
                       contractAddress: USDT_TRON_CONTRACT,
+                    },
+                  },
+                  gasFreeUsdtTransfer: {
+                    summary:
+                      "USDT transfer with delegated energy (skip fee pre-check)",
+                    value: {
+                      to: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                      amount: "100.5",
+                      contractAddress: USDT_TRON_CONTRACT,
+                      gasFree: true,
                     },
                   },
                 },
@@ -801,11 +885,28 @@ Important notes:
                     },
                   },
                   usdtTransfer: {
-                    summary: "ERC20 transfer",
+                    summary: "ERC20 transfer (USDT on Ethereum)",
                     value: {
                       to: EXAMPLE_EVM_RECIPIENT,
                       amount: "100.5",
                       contractAddress: USDT_ETHEREUM_CONTRACT,
+                    },
+                  },
+                  usdtOnBaseTransfer: {
+                    summary:
+                      "ERC20 transfer (USDT on Base — the token contract differs per network)",
+                    value: {
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "100.5",
+                      contractAddress: USDT_BASE_CONTRACT,
+                    },
+                  },
+                  gasFreeTransfer: {
+                    summary: "Native transfer without the fee pre-check",
+                    value: {
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "0.05",
+                      gasFree: true,
                     },
                   },
                 },
@@ -1055,6 +1156,22 @@ Any path shape is accepted (BIP44 shape is not required), but a BIP44-shaped pat
                   schema: {
                     $ref: "#/components/schemas/WalletAddressByPathResponse",
                   },
+                  examples: {
+                    evm: {
+                      summary: "GET /ethereum/wallet/address/44/60/0",
+                      value: {
+                        address: EXAMPLE_EVM_ADDRESS,
+                        path: "m/44/60/0",
+                      },
+                    },
+                    tron: {
+                      summary: "GET /tron/wallet/address/44/195/0",
+                      value: {
+                        address: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                        path: "m/44/195/0",
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -1094,6 +1211,23 @@ Any path shape is accepted (BIP44 shape is not required), but a BIP44-shaped pat
               content: {
                 "application/json": {
                   schema: { $ref: "#/components/schemas/WalletBalanceResponse" },
+                  examples: {
+                    native: {
+                      summary: "GET /ethereum/wallet/balance/44/60/0",
+                      value: {
+                        asset: "ETH",
+                        value: "1500000000000000000",
+                      },
+                    },
+                    token: {
+                      summary:
+                        "GET /tron/wallet/balance/44/195/0?contractAddress=<USDT>",
+                      value: {
+                        asset: USDT_TRON_CONTRACT,
+                        value: "100000000",
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -1137,8 +1271,31 @@ The request body matches the network family: TRON body with Base58 addresses und
                   ],
                 },
                 examples: {
-                  usdtOnBase: {
-                    summary: "ERC20 transfer from m/44/60/0",
+                  trxTransfer: {
+                    summary: "POST /tron/transaction/44/195/0 — TRX transfer",
+                    value: {
+                      to: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                      amount: "1.5",
+                    },
+                  },
+                  trc20Transfer: {
+                    summary: "POST /tron/transaction/44/195/0 — USDT (TRC20)",
+                    value: {
+                      to: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                      amount: "100.5",
+                      contractAddress: USDT_TRON_CONTRACT,
+                    },
+                  },
+                  nativeTransfer: {
+                    summary: "POST /ethereum/transaction/44/60/0 — ETH transfer",
+                    value: {
+                      to: EXAMPLE_EVM_RECIPIENT,
+                      amount: "0.05",
+                    },
+                  },
+                  erc20Transfer: {
+                    summary:
+                      "POST /ethereum/transaction/44/60/0 — USDT (ERC20)",
                     value: {
                       to: EXAMPLE_EVM_RECIPIENT,
                       amount: "100.5",
@@ -1199,10 +1356,18 @@ The request body matches the network family: TRON body with Base58 addresses und
                 },
                 examples: {
                   evm: {
+                    summary: "POST /ethereum/calculate/fees/44/60/0 — USDT",
                     value: {
                       to: EXAMPLE_EVM_RECIPIENT,
                       amount: "100",
                       contract: USDT_ETHEREUM_CONTRACT,
+                    },
+                  },
+                  tron: {
+                    summary: "POST /tron/calculate/fees/44/195/0 — TRX",
+                    value: {
+                      to: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                      amount: "1.5",
                     },
                   },
                 },
