@@ -46,6 +46,12 @@ REQ_USDT_TRON=2000000       # 2 USDT (6 decimals)
 REQ_ETH_WEI=500000000000000 # 0.0005 ETH on Base
 REQ_USDT_EVM=2000000        # 2 USDT (6 decimals)
 
+# Delegated-energy mode: wallet A holds no TRX, its energy is delegated.
+# Skips the TRX-transfer test, waives the TRX funding requirement and relies
+# on free bandwidth + delegated energy for the USDT send (fee quote must show
+# needsToBurn == 0). The TRON sweep is skipped: B stays unactivated.
+TRON_DELEGATED="${SMOKE_TRON_DELEGATED:-0}"
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 PASS=0
@@ -180,7 +186,12 @@ check_funding() { # LABEL URL MIN HUMAN
     FUND_OK=0
   fi
 }
-check_funding "TRX on A"       "/wallet/balance?$LEGACY_A" "$REQ_TRX_SUN" "40 TRX -> $A_TRON"
+if [ "$TRON_DELEGATED" = "1" ]; then
+  api GET "/wallet/balance?$LEGACY_A"
+  info "TRX on A: $(field .value) (delegated-energy mode: TRX requirement waived)"
+else
+  check_funding "TRX on A"       "/wallet/balance?$LEGACY_A" "$REQ_TRX_SUN" "40 TRX -> $A_TRON"
+fi
 check_funding "USDT(tron) on A" "/wallet/balance?$LEGACY_A&contractAddress=$USDT_TRON" "$REQ_USDT_TRON" "2 USDT (TRC20) -> $A_TRON"
 check_funding "ETH(Base) on A" "/wallet/balance/$EVM_PATH_A?chainId=$CHAIN_ID" "$REQ_ETH_WEI" "0.0005 ETH on Base -> $A_EVM"
 check_funding "USDT(Base) on A" "/wallet/balance/$EVM_PATH_A?chainId=$CHAIN_ID&contractAddress=$USDT_EVM" "$REQ_USDT_EVM" "2 USDT on Base -> $A_EVM"
@@ -191,8 +202,24 @@ if [ "$FUND_OK" != "1" ]; then
 fi
 
 say "[3] Fee previews"
-api POST "/calculate/fees" "{\"from\":\"$A_TRON\",\"to\":\"$B_TRON\",\"amount\":\"$TRX_AMOUNT\"}"
-[ "$RESP_CODE" = "200" ] && ok "tron fee quote: totalFeeTRX=$(field .totalFeeTRX)" || bad "tron fee quote failed ($RESP_CODE): $RESP_BODY"
+if [ "$TRON_DELEGATED" = "1" ]; then
+  api POST "/calculate/fees" "{\"from\":\"$A_TRON\",\"to\":\"$B_TRON\",\"amount\":\"$USDT_TRON_AMOUNT\",\"contract\":\"$USDT_TRON\"}"
+  if [ "$RESP_CODE" = "200" ]; then
+    E_BURN="$(field .energy.coverage.needsToBurn)"
+    B_BURN="$(field .bandwidth.coverage.needsToBurn)"
+    if [ "$E_BURN" = "0" ] && [ "$B_BURN" = "0" ]; then
+      ok "USDT quote: delegated energy covers the transfer (available=$(field .energy.available), required=$(field .energy.required), totalFeeTRX=$(field .totalFeeTRX))"
+    else
+      bad "USDT quote needs a TRX burn (energy=$E_BURN, bandwidth=$B_BURN) — with 0 TRX the send will fail. Delegate more energy or fund TRX."
+      die "fix the TRON resources before sending"
+    fi
+  else
+    bad "tron fee quote failed ($RESP_CODE): $RESP_BODY"
+  fi
+else
+  api POST "/calculate/fees" "{\"from\":\"$A_TRON\",\"to\":\"$B_TRON\",\"amount\":\"$TRX_AMOUNT\"}"
+  [ "$RESP_CODE" = "200" ] && ok "tron fee quote: totalFeeTRX=$(field .totalFeeTRX)" || bad "tron fee quote failed ($RESP_CODE): $RESP_BODY"
+fi
 api POST "/calculate/fees/$EVM_PATH_A" "{\"chainId\":$CHAIN_ID,\"to\":\"$B_EVM\",\"amount\":\"$ETH_AMOUNT\"}"
 [ "$RESP_CODE" = "200" ] && ok "evm fee quote: totalFeeNative=$(field .totalFeeNative)" || bad "evm fee quote failed ($RESP_CODE): $RESP_BODY"
 
@@ -204,18 +231,23 @@ if [ "${SMOKE_YES:-0}" != "1" ]; then
 fi
 
 say "[4] TRON via the legacy client API"
-send_and_replay "TRX $TRX_AMOUNT A->B" "/transaction?$LEGACY_A" \
-  "{\"to\":\"$B_TRON\",\"amount\":\"$TRX_AMOUNT\"}" "$RUN_ID-trx" \
-  "https://tronscan.org/#/transaction/" || true
-
-# Key reuse with different parameters must be rejected, never paid.
-api POST "/transaction?$LEGACY_A" "{\"to\":\"$B_TRON\",\"amount\":\"0.5\"}" "$RUN_ID-trx"
-[ "$RESP_CODE" = "409" ] && ok "key reuse with different amount -> 409 (no payment)" \
-  || bad "key-reuse guard: expected 409, got $RESP_CODE: $RESP_BODY"
+if [ "$TRON_DELEGATED" = "1" ]; then
+  info "TRX transfer test skipped (delegated-energy mode, wallet holds no TRX)"
+else
+  send_and_replay "TRX $TRX_AMOUNT A->B" "/transaction?$LEGACY_A" \
+    "{\"to\":\"$B_TRON\",\"amount\":\"$TRX_AMOUNT\"}" "$RUN_ID-trx" \
+    "https://tronscan.org/#/transaction/" || true
+fi
 
 send_and_replay "USDT(tron) $USDT_TRON_AMOUNT A->B" "/transaction?$LEGACY_A" \
   "{\"to\":\"$B_TRON\",\"amount\":\"$USDT_TRON_AMOUNT\",\"contractAddress\":\"$USDT_TRON\"}" "$RUN_ID-usdt-tron" \
   "https://tronscan.org/#/transaction/" || true
+
+# Key reuse with different parameters must be rejected, never paid.
+api POST "/transaction?$LEGACY_A" \
+  "{\"to\":\"$B_TRON\",\"amount\":\"0.5\",\"contractAddress\":\"$USDT_TRON\"}" "$RUN_ID-usdt-tron"
+[ "$RESP_CODE" = "409" ] && ok "key reuse with different amount -> 409 (no payment)" \
+  || bad "key-reuse guard: expected 409, got $RESP_CODE: $RESP_BODY"
 
 say "[5] EVM (chainId $CHAIN_ID) via the global API"
 send_and_replay "ETH $ETH_AMOUNT A->B" "/transaction/$EVM_PATH_A" \
@@ -250,7 +282,11 @@ else
 fi
 
 say "[7] Arrival check on B"
-wait_balance_at_least "TRX on B" "/wallet/balance?$LEGACY_B" 900000 || true
+if [ "$TRON_DELEGATED" = "1" ]; then
+  info "TRX arrival on B skipped (delegated-energy mode)"
+else
+  wait_balance_at_least "TRX on B" "/wallet/balance?$LEGACY_B" 900000 || true
+fi
 wait_balance_at_least "USDT(tron) on B" "/wallet/balance?$LEGACY_B&contractAddress=$USDT_TRON" 1000000 || true
 wait_balance_at_least "ETH(Base) on B" "/wallet/balance/$EVM_PATH_B?chainId=$CHAIN_ID" 100000000000000 || true
 wait_balance_at_least "USDT(Base) on B" "/wallet/balance/$EVM_PATH_B?chainId=$CHAIN_ID&contractAddress=$USDT_EVM" 1000000 || true
@@ -259,10 +295,14 @@ if [ "${SMOKE_SWEEP:-0}" = "1" ]; then
   say "[8] Sweep B -> A (send-max recipe)"
   # Tokens: full balance. Native: balance minus the quoted fee (minus 1 SUN on tron).
   api GET "/wallet/balance?$LEGACY_B&contractAddress=$USDT_TRON"; USDT_B="$(field .value)"
+  if [ "$TRON_DELEGATED" = "1" ]; then
+    info "TRON sweep skipped: B is unactivated and has no resources; its USDT stays until B is activated/delegated."
+    USDT_B=""
+  fi
   if [ -n "$USDT_B" ] && [ "$USDT_B" != "0" ]; then
     AMT="$(python3 -c "print(f'{int(\"$USDT_B\")/10**6:.6f}'.rstrip('0').rstrip('.'))")"
     send_and_replay "sweep USDT(tron) B->A" "/transaction?$LEGACY_B" \
-      "{\"to\":\"$A_TRON\",\"amount\":\"$AMT\"}" "$RUN_ID-sweep-usdt-tron" "https://tronscan.org/#/transaction/" || true
+      "{\"to\":\"$A_TRON\",\"amount\":\"$AMT\",\"contractAddress\":\"$USDT_TRON\"}" "$RUN_ID-sweep-usdt-tron" "https://tronscan.org/#/transaction/" || true
   fi
   api GET "/wallet/balance/$EVM_PATH_B?chainId=$CHAIN_ID&contractAddress=$USDT_EVM"; USDT_EB="$(field .value)"
   if [ -n "$USDT_EB" ] && [ "$USDT_EB" != "0" ]; then
