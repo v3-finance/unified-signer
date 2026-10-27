@@ -1,14 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import type { TronWeb } from "tronweb";
 import type { PublicClient } from "viem";
-import { z } from "zod";
 import {
   type CalculateTronFeeResult,
   TransactionType,
   type TronAccountResource,
 } from "../lib/interfaces/tron";
 import { TRON_CONSTANTS } from "../lib/constants";
-import { publicErrorMessage } from "../lib/errors";
+import { doErrorResponse, InputError } from "../lib/errors";
 import { createEvmClient } from "../lib/evm/client";
 import { estimateEvmFees } from "../lib/evm/fees";
 import {
@@ -20,7 +19,8 @@ import {
   evmCalculateResponseSchema,
 } from "../lib/schemas/evm";
 import { calculateSchema } from "../lib/schemas/tron";
-import { buildTronGridUrl, createTronWeb } from "../lib/tron/client";
+import { createTronWeb, tronGridFetch } from "../lib/tron/client";
+import { withTronGridRetry } from "../lib/tron/retry";
 import { getTrc20TokenInfo } from "../lib/tron/token";
 import {
   formatBaseUnits,
@@ -59,6 +59,7 @@ type SendTrxResult = {
 
 type GasCalculatorEnv = {
   TRONGRID_BASE_URL: string;
+  TRONGRID_API_KEY?: string;
   EVM_NETWORKS: string;
 };
 
@@ -75,7 +76,7 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
   constructor(ctx: DurableObjectState, env: GasCalculatorEnv) {
     super(ctx, env);
     this.tronGridBaseUrl = env.TRONGRID_BASE_URL;
-    this.tronWeb = createTronWeb(this.tronGridBaseUrl);
+    this.tronWeb = createTronWeb(env);
   }
 
   private getEvmClient(config: EvmNetworkConfig): PublicClient {
@@ -90,42 +91,11 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
     return client;
   }
 
-  private async retryWithBackoff<T>(
-    fn: () => Promise<T>,
-    operationName = "operation",
-    maxRetries = 3,
-    initialDelayMs = 1_000
-  ): Promise<T> {
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt < maxRetries; attempt += 1) {
-      try {
-        return await fn();
-      } catch (error) {
-        lastError = error as Error;
-        const message = lastError.message || "Unknown error";
-
-        if (message.includes("429") || message.includes("Too Many Requests")) {
-          const delayMs = initialDelayMs * Math.pow(2, attempt);
-          await new Promise((resolve) => setTimeout(resolve, delayMs));
-          continue;
-        }
-
-        throw error;
-      }
-    }
-
-    throw new Error(
-      `Failed after ${maxRetries} retries on "${operationName}": ${lastError?.message || "Unknown error"}`
-    );
-  }
-
   private async getAccountResources(
     address: string
   ): Promise<TronAccountResource> {
-    const resources = (await this.retryWithBackoff(
-      () => this.tronWeb.trx.getAccountResources(address),
-      `getAccountResources(${address})`
+    const resources = (await withTronGridRetry(`getAccountResources(${address})`, () =>
+      this.tronWeb.trx.getAccountResources(address)
     )) as TronAccountResource;
 
     return {
@@ -195,9 +165,8 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
   }
 
   private async isAddressActivated(address: string): Promise<boolean> {
-    const account = (await this.retryWithBackoff(
-      () => this.tronWeb.trx.getAccount(address),
-      `getAccount(${address})`
+    const account = (await withTronGridRetry(`getAccount(${address})`, () =>
+      this.tronWeb.trx.getAccount(address)
     )) as TronAccount;
 
     return Boolean(account?.address);
@@ -205,9 +174,8 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
 
   private async getEnergyPrice(): Promise<number> {
     try {
-      const chainParameters = (await this.retryWithBackoff(
-        () => this.tronWeb.trx.getChainParameters(),
-        "getChainParameters"
+      const chainParameters = (await withTronGridRetry("getChainParameters", () =>
+        this.tronWeb.trx.getChainParameters()
       )) as ChainParameter[];
       const energyFeeParam = chainParameters.find(
         (parameter: ChainParameter) => parameter.key === "getEnergyFee"
@@ -233,13 +201,11 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
     amount: string,
     contractAddress: string
   ): Promise<number> {
-    const tokenInfo = await this.retryWithBackoff(
-      () => getTrc20TokenInfo(this.tronWeb, contractAddress),
-      `getTrc20TokenInfo(${contractAddress})`
-    );
+    const tokenInfo = await getTrc20TokenInfo(this.tronWeb, contractAddress);
     const amountRaw = normalizeTrc20Amount(amount, tokenInfo.decimals);
 
-    const transaction = (await this.retryWithBackoff(
+    const transaction = (await withTronGridRetry(
+      `triggerSmartContract(${contractAddress})`,
       () =>
         this.tronWeb.transactionBuilder.triggerSmartContract(
           contractAddress,
@@ -253,8 +219,7 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
             { type: "uint256", value: amountRaw },
           ],
           senderAddress
-        ),
-      `triggerSmartContract(${contractAddress})`
+        )
     )) as TriggerSmartContractResult;
 
     if (!transaction?.transaction?.raw_data_hex) {
@@ -279,17 +244,15 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
     const amountInSun = Number(trxToSunStr(amount));
 
     if (!Number.isSafeInteger(amountInSun)) {
-      throw new Error("TRX amount is too large to estimate safely");
+      throw new InputError("TRX amount is too large to estimate safely");
     }
 
-    const transaction = (await this.retryWithBackoff(
-      () =>
-        this.tronWeb.transactionBuilder.sendTrx(
-          recipientAddress,
-          amountInSun,
-          senderAddress
-        ),
-      `sendTrx(${recipientAddress})`
+    const transaction = (await withTronGridRetry(`sendTrx(${recipientAddress})`, () =>
+      this.tronWeb.transactionBuilder.sendTrx(
+        recipientAddress,
+        amountInSun,
+        senderAddress
+      )
     )) as SendTrxResult;
 
     if (!transaction?.raw_data_hex) {
@@ -311,16 +274,12 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
     contractAddress: string
   ): Promise<boolean> {
     try {
-      const response = await this.retryWithBackoff(
-        () =>
-          fetch(
-            buildTronGridUrl(
-              `/v1/accounts/${address}/transactions/trc20?contract_address=${contractAddress}`,
-              this.tronGridBaseUrl
-            )
-          ).then((result) => result.json() as Promise<Trc20TransactionsResponse>),
+      const response = await tronGridFetch(
+        this.env,
+        `/v1/accounts/${address}/transactions/trc20?contract_address=${contractAddress}`,
+        {},
         `checkContractTransactions(${address})`
-      );
+      ).then((result) => result.json() as Promise<Trc20TransactionsResponse>);
 
       return Boolean(
         response.data?.some(
@@ -339,11 +298,11 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
     contractAddress?: string
   ): Promise<CalculateTronFeeResult> {
     if (!senderAddress || !recipientAddress || !amount) {
-      throw new Error("Missing required parameters");
+      throw new InputError("Missing required parameters");
     }
 
     if (senderAddress === recipientAddress) {
-      throw new Error("Sender and recipient must be different");
+      throw new InputError("Sender and recipient must be different");
     }
 
     const transactionType = contractAddress
@@ -392,10 +351,7 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
     let recipientHasTransactions = false;
 
     if (transactionType === TransactionType.TRC20_TRANSFER && contractAddress) {
-      const tokenInfo = await this.retryWithBackoff(
-        () => getTrc20TokenInfo(this.tronWeb, contractAddress),
-        `getTrc20TokenInfo(${contractAddress})`
-      );
+      const tokenInfo = await getTrc20TokenInfo(this.tronWeb, contractAddress);
       recipientHasTransactions = await this.isAddressHasContractTransactions(
         recipientAddress,
         contractAddress
@@ -538,24 +494,7 @@ export class GasCalculator extends DurableObject<GasCalculatorEnv> {
 
       return json({ error: "Not found" }, 404);
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        return json(
-          {
-            ok: false,
-            error: "Validation Error",
-            details: error.issues,
-          },
-          400
-        );
-      }
-
-      return json(
-        {
-          ok: false,
-          error: publicErrorMessage(error),
-        },
-        400
-      );
+      return doErrorResponse(error);
     }
   }
 }

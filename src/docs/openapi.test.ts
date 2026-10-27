@@ -35,6 +35,12 @@ describe("openapi document", () => {
         "/wallet/balance/{path}",
         "/transaction/{path}",
         "/calculate/fees/{path}",
+        // Legacy cloud-tron-wallet compatibility surface.
+        "/wallet/address",
+        "/wallet/balance",
+        "/wallet/history",
+        "/transaction",
+        "/calculate/fees",
       ].sort()
     );
   });
@@ -45,6 +51,7 @@ describe("openapi document", () => {
 
     expect(paths.some((path) => path.includes("{network}"))).toBe(false);
     expect(paths.some((path) => path.startsWith("/tron/"))).toBe(false);
+    expect(document.paths["/transaction"].post.tags).toEqual(["Legacy"]);
     expect(paths.some((path) => path.includes("monitor"))).toBe(false);
     expect(paths.some((path) => path.includes("webhook"))).toBe(false);
   });

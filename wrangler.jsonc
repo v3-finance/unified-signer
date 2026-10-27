@@ -7,6 +7,7 @@
   "vars": {
     "baseUrl": "https://unified-signer.ezig.workers.dev",
     "TRONGRID_BASE_URL": "https://api.trongrid.io",
+    "MONITOR_CLIENTS_BASE_URL": "https://tron-events.esim.cash",
     "EVM_NETWORKS": "[{\"key\":\"ethereum\",\"name\":\"Ethereum\",\"chainId\":1,\"rpcUrl\":\"https://ethereum-rpc.publicnode.com\",\"nativeSymbol\":\"ETH\",\"nativeDecimals\":18,\"feeType\":\"eip1559\"},{\"key\":\"bsc\",\"name\":\"BNB Smart Chain\",\"chainId\":56,\"rpcUrl\":\"https://bsc-rpc.publicnode.com\",\"nativeSymbol\":\"BNB\",\"nativeDecimals\":18,\"feeType\":\"legacy\"},{\"key\":\"polygon\",\"name\":\"Polygon\",\"chainId\":137,\"rpcUrl\":\"https://polygon-bor-rpc.publicnode.com\",\"nativeSymbol\":\"POL\",\"nativeDecimals\":18,\"feeType\":\"eip1559\"},{\"key\":\"base\",\"name\":\"Base\",\"chainId\":8453,\"rpcUrl\":\"https://base-rpc.publicnode.com\",\"nativeSymbol\":\"ETH\",\"nativeDecimals\":18,\"feeType\":\"eip1559\"}]"
   },
   "durable_objects": {

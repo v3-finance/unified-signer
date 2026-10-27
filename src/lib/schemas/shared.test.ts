@@ -39,7 +39,12 @@ describe("derivation path schema", () => {
   test("rejects malformed and out-of-range paths", () => {
     expect(() => DerivationPathSchema.parse("44/60/0")).toThrow();
     expect(() => DerivationPathSchema.parse("m/44h/60h")).toThrow();
-    expect(() => DerivationPathSchema.parse("m/2147483648")).toThrow();
+    // Legacy unhardened levels may use full uint32 indexes...
+    expect(DerivationPathSchema.parse("m/44'/195'/0'/2147483648")).toBe(
+      "m/44'/195'/0'/2147483648"
+    );
+    // ...but nothing beyond uint32.
+    expect(() => DerivationPathSchema.parse("m/4294967296")).toThrow();
   });
 });
 

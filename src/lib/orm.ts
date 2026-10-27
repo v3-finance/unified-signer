@@ -1,7 +1,7 @@
 import type { Context } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
-import { DOFailureError } from "./errors";
+import { DOCallError } from "./errors";
 import * as schemas from "./schemas/do";
 import {
   type EvmCalculateDoRequest,
@@ -35,6 +35,16 @@ export const DO_ROUTES = {
       body: schemas.TronTxSignRequestSchema,
       response: schemas.TronTxSignResponseSchema,
     },
+    "/idempotency": {
+      method: "GET" as const,
+      query: schemas.IdempotencyLookupQuerySchema,
+      response: schemas.IdempotencyLookupResponseSchema,
+    },
+    "/idempotency/broadcast": {
+      method: "POST" as const,
+      body: schemas.IdempotencyBroadcastRequestSchema,
+      response: schemas.IdempotencyMutationResponseSchema,
+    },
     "/evmSign": {
       method: "POST" as const,
       body: schemas.EvmTxSignRequestSchema,
@@ -63,6 +73,11 @@ export const DO_ROUTES = {
       method: "GET" as const,
       query: schemas.RegistryBalanceQuerySchema,
       response: schemas.WalletBalanceResponse,
+    },
+    "/getHistory": {
+      method: "GET" as const,
+      query: schemas.RegistryBalanceQuerySchema,
+      response: schemas.WalletHistoryResponseSchema,
     },
   },
 } as const;
@@ -161,13 +176,7 @@ async function callDO<N extends DONamespace, R extends DORoute<N>>(
   const responseData = await parseResponse(response);
 
   if (!response.ok) {
-    // 4xx payloads are surfaced to API clients by app.onError; 5xx stay
-    // internal.
-    throw new DOFailureError(
-      `${namespace}${route}`,
-      response.status,
-      responseData
-    );
+    throw new DOCallError(`${namespace}${route}`, response.status, responseData);
   }
 
   if (validateResponse && routeSchema.response) {
@@ -252,6 +261,18 @@ export class SignerClient extends BaseDOClient<"SIGNER"> {
   ): Promise<schemas.EvmTxSignResponse> {
     return this.call("/evmSign", { body: data });
   }
+
+  async getIdempotencyRecord(
+    query: schemas.IdempotencyLookupQuery
+  ): Promise<z.infer<typeof schemas.IdempotencyLookupResponseSchema>> {
+    return this.call("/idempotency", { query });
+  }
+
+  async markIdempotencyBroadcast(
+    data: schemas.IdempotencyBroadcastRequest
+  ): Promise<z.infer<typeof schemas.IdempotencyMutationResponseSchema>> {
+    return this.call("/idempotency/broadcast", { body: data });
+  }
 }
 
 export class RegistryClient extends BaseDOClient<"REGISTRY"> {
@@ -269,6 +290,12 @@ export class RegistryClient extends BaseDOClient<"REGISTRY"> {
     query: z.input<typeof schemas.RegistryBalanceQuerySchema>
   ): Promise<z.infer<typeof schemas.WalletBalanceResponse>> {
     return this.call("/getBalance", { query });
+  }
+
+  async getHistory(
+    query: z.input<typeof schemas.RegistryBalanceQuerySchema>
+  ): Promise<z.infer<typeof schemas.WalletHistoryResponseSchema>> {
+    return this.call("/getHistory", { query });
   }
 }
 

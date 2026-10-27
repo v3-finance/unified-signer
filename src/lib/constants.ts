@@ -28,6 +28,7 @@ export const TRON_CONSTANTS = {
   CONTRACTS: {
     USDT_MAINNET: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
     USDT_NILE: "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj",
+    A7A5_MAINNET: "TLeVfrdym8RoJreJ23dAGyfJDygRtiWKBZ",
   },
 };
 

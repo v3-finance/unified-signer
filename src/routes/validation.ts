@@ -19,7 +19,10 @@ export async function parseJsonBodyOr400<Schema extends z.ZodTypeAny>(
   } catch {
     return {
       ok: false,
-      response: c.json({ error: "Request body must be valid JSON" }, 400),
+      response: c.json(
+        { error: "Request body must be valid JSON", retryable: false },
+        400
+      ),
     };
   }
 
@@ -32,6 +35,7 @@ export async function parseJsonBodyOr400<Schema extends z.ZodTypeAny>(
         {
           error: "Validation Error",
           details: result.error.issues,
+          retryable: false,
         },
         400
       ),
@@ -39,27 +43,4 @@ export async function parseJsonBodyOr400<Schema extends z.ZodTypeAny>(
   }
 
   return { ok: true, data: result.data as z.output<Schema> };
-}
-
-// Amount-to-base-units conversion can reject schema-valid input (more
-// fractional digits than the asset supports); that is a client error, not an
-// internal one.
-export function convertAmountOr400(
-  c: Context<Env, string>,
-  convert: () => string
-): { ok: true; value: bigint } | { ok: false; response: Response } {
-  try {
-    return { ok: true, value: BigInt(convert()) };
-  } catch (error) {
-    return {
-      ok: false,
-      response: c.json(
-        {
-          error:
-            error instanceof Error ? error.message : "Invalid amount",
-        },
-        400
-      ),
-    };
-  }
 }
