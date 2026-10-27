@@ -9,6 +9,19 @@ const USDT_BASE_CONTRACT = "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2";
 const EXAMPLE_EVM_ADDRESS = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
 const EXAMPLE_EVM_RECIPIENT = "0x8ba1f109551bD432803012645Ac136ddd64DBA72";
 
+function createLegacyQueryParameters() {
+  return ["appId", "purpose", "asset", "stage", "index"].map((name) => ({
+    name,
+    in: "query",
+    required: true,
+    description:
+      name === "appId"
+        ? "Hardened application level of the legacy tree (max 2^31-1)."
+        : "Derivation level of the legacy tree (max 2^32-1).",
+    schema: { type: "integer", minimum: 0, example: 0 },
+  }));
+}
+
 function createDerivationPathParameter() {
   return {
     name: "path",
@@ -142,6 +155,38 @@ GET ${baseUrl}/wallet/address/44/60/42
 - Число дробных знаков не должно превышать decimals актива (6 для TRX, 18 для ETH, decimals токена), иначе 400
 - \`fee\` в ответе \`/transaction\` — десятичная строка в нативной монете сети (\`"0"\` при \`gasFree\`)
 
+## Legacy API (совместимость с cloud-tron-wallet)
+
+Для существующих TRON-клиентов сервис байт-в-байт воспроизводит API оригинального cloud-tron-wallet — те же пути, параметры, формы ответов и идемпотентность с ключами, скоупленными по \`appId\`:
+
+\`\`\`
+GET  /wallet/address?appId&purpose&asset&stage&index
+GET  /wallet/balance?{derivation}[&contractAddress]
+GET  /wallet/history?{derivation}[&contractAddress]
+POST /transaction?{derivation}            (+ Idempotency-Key; fee в ответе — число)
+POST /calculate/fees                      ({from, to, amount[, contract]})
+POST|DELETE /monitor/{id}/wallets, GET /monitor/{id}/add|remove/wallet
+POST /webhook
+\`\`\`
+
+Эти эндпоинты работают на ИСХОДНОМ hardened-дереве \`m/44'/195'/{appId}'/{purpose}/{asset}/{stage}/{index}\` — все ранее выданные адреса остаются действительными. Новые интеграции должны использовать глобальные path-эндпоинты выше.
+
+## Идемпотентность и ретраи
+
+Для КАЖДОЙ выплаты рекомендуется заголовок \`Idempotency-Key\` (уникальная строка до 128 печатных ASCII-символов). Гарантии:
+
+- Повтор запроса с тем же ключом **никогда не отправляет вторую транзакцию**, пока первая может исполниться: сервис переотправляет ровно те же подписанные байты
+- Уже выполненная выплата отвечает \`200 {"txId", "fee", "replayed": true}\`
+- Ключ, использованный с другими параметрами, отвечает \`409\`
+- Пока исход неизвестен — \`503\` с \`retryable: true\`: повторяйте позже с тем же ключом
+
+Семантика «мёртвой» транзакции по семьям сетей:
+
+- **TRON**: транзакция имеет \`expiration\` (~60 с). Новая транзакция по тому же ключу отправляется только когда старая истекла, прошло ещё 5 минут, solidified-блоки покрыли окно включения, и транзакции нет в блоке
+- **EVM**: подписанная транзакция не истекает. Новая отправляется только когда её nonce финализированно занят другой транзакцией, а receipt отсутствует
+
+Правила ретраев без ключа: \`502\` с \`retryable: false\` не повторять; \`Broadcast outcome unknown\` без ключа означает, что транзакция МОГЛА уйти в сеть — проверяйте \`txId\` в сканере, прежде чем слать новую.
+
 ## Справочник ошибок
 
 | Код | Тело | Когда |
@@ -155,10 +200,15 @@ GET ${baseUrl}/wallet/address/44/60/42
 | 400 | \`{"error": "Unable to read token contract", "message"}\` | \`contractAddress\` — не читаемый токен-контракт |
 | 400 | \`{"error": "Invalid path segment ..."}\` | Ошибка в сыром пути (не число, маркер харденинга, глубина, диапазон) |
 | 400 | \`{"error": "Unknown chainId ...", "availableChainIds": [...]}\` | \`chainId\` не соответствует ни одной сконфигурированной EVM-сети |
-| 400 | \`{"ok": false, "error": "..."}\` | Отказ построения/подписи/оценки на стороне сети (невалидный base58, revert estimateGas и т.п.) |
+| 400/502 | \`{"error", "stage", "retryable"[, "details"]}\` | Отказ стадии пайплайна (Registry/TxBuilder/Signer/GasCalculator): \`stage\` называет её, \`retryable\` — можно ли повторять |
 | 404 | \`{"error": "Unknown network ...", "availableNetworks": [...]}\` | Неизвестный ключ сети |
-| 502 | \`{"error": "Failed to broadcast transaction", "details"}\` | Сеть не приняла подписанную транзакцию |
-| 500 | \`{"error": "Internal Server Error"}\` | Сбой апстрима (RPC/TronGrid недоступен, rate limit); детали в логах воркера |
+| 409 | \`{"error": "Idempotency key was already used...", "txId", "retryable": false}\` | Ключ использован с другими параметрами выплаты |
+| 409 | \`{"error": "Idempotency key is being used by another request...", "retryable": true}\` | Конкурентный запрос с тем же ключом подписывает прямо сейчас |
+| 502 | \`{"error": "Failed to broadcast transaction", "txId", "retryable", "details"}\` | Нода отклонила транзакцию; \`retryable: false\` — детерминированный отказ |
+| 502 | \`{"error": "Broadcast outcome unknown", "txId", "retryable", "details"}\` | Исход неизвестен: с ключом повторяйте (переотправятся те же байты), без ключа — проверяйте txId |
+| 503 | \`{"error": "...not confirmed yet...", "txId", "retryable": true}\` | Транзакция по ключу ещё в полёте; повторите позже с тем же ключом |
+| 503 | \`{"error": "Failed to broadcast transaction", "txId", "retryable": true, "details": {"code": "RATE_LIMITED"}}\` | Шлюз не пропустил broadcast из-за rate limit — до ноды запрос не дошёл, повтор безопасен |
+| 500 | \`{"error": "Internal Server Error", "message", "retryable": true}\` | Непредвиденный сбой до подписи — повтор безопасен; детали в логах воркера |
 
 ## Архитектура
 
@@ -212,6 +262,11 @@ GET ${baseUrl}/wallet/address/44/60/42
         name: "Transaction",
         description:
           "High-level transaction execution flow: balance checks, fee estimation, build, sign and broadcast.",
+      },
+      {
+        name: "Legacy",
+        description:
+          "Byte-compatible API of the original cloud-tron-wallet service (hardened derivation tree, TRON only). Existing clients keep working unchanged; new integrations should use the global raw-path endpoints.",
       },
       {
         name: "Fees",
@@ -277,6 +332,180 @@ GET ${baseUrl}/wallet/address/44/60/42
                   schema: {
                     type: "string",
                   },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/wallet/address": {
+        get: {
+          tags: ["Legacy"],
+          summary: "Legacy: derive a TRON address (hardened tree)",
+          description:
+            "Original cloud-tron-wallet endpoint. Derives on m/44'/195'/{appId}'/{purpose}/{asset}/{stage}/{index} — the tree all previously issued addresses live on.",
+          operationId: "legacyGetWalletAddress",
+          parameters: createLegacyQueryParameters(),
+          responses: {
+            "200": {
+              description: "Derived wallet address.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["address"],
+                    properties: {
+                      address: { $ref: "#/components/schemas/TronAddress" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/wallet/balance": {
+        get: {
+          tags: ["Legacy"],
+          summary: "Legacy: get a TRON wallet balance",
+          operationId: "legacyGetWalletBalance",
+          parameters: [
+            ...createLegacyQueryParameters(),
+            {
+              name: "contractAddress",
+              in: "query",
+              required: false,
+              schema: { $ref: "#/components/schemas/TronAddress" },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Balance in smallest units (SUN or token base units).",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/WalletBalanceResponse" },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/wallet/history": {
+        get: {
+          tags: ["Legacy"],
+          summary: "Legacy: get TRX or TRC20 transfer history",
+          operationId: "legacyGetWalletHistory",
+          parameters: [
+            ...createLegacyQueryParameters(),
+            {
+              name: "contractAddress",
+              in: "query",
+              required: false,
+              description:
+                "Optional TRC20 contract filter; without it native TRX history is returned.",
+              schema: { $ref: "#/components/schemas/TronAddress" },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Transfers, newest first.",
+              content: {
+                "application/json": {
+                  schema: { type: "array", items: { type: "object", additionalProperties: true } },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/transaction": {
+        post: {
+          tags: ["Legacy"],
+          summary: "Legacy: build, sign and broadcast a TRON transaction",
+          description:
+            "Original cloud-tron-wallet endpoint with the full payout-safety contract: Idempotency-Key (scoped by appId), replay as 200 {replayed: true}, 409 on key conflicts, retryable broadcast errors, 503 while unconfirmed. `fee` in the 201 response is a NUMBER, as in the original service.",
+          operationId: "legacyCreateTransaction",
+          parameters: [
+            ...createLegacyQueryParameters(),
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              schema: { type: "string", maxLength: 128 },
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/CreateTronTransactionRequest",
+                },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description:
+                "Broadcast accepted. `fee` is a number (legacy shape).",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["txId", "fee"],
+                    properties: {
+                      txId: { type: "string" },
+                      fee: {
+                        oneOf: [{ type: "number" }, { type: "string" }],
+                        description:
+                          "Number for quoted fees; the string \"0\" when gasFree was requested.",
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            "200": {
+              description: "Replay of an already-sent payout.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ReplayedTransactionResponse",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/calculate/fees": {
+        post: {
+          tags: ["Legacy"],
+          summary: "Legacy: calculate TRON fees with an explicit sender",
+          operationId: "legacyCalculateFees",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/CalculateFeesByPathRequest" },
+                examples: {
+                  trx: {
+                    value: {
+                      from: "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9",
+                      to: "TUdbkixK7zU4ua7YC2oNz6ujsfZxb98GFb",
+                      amount: "1.5",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "Detailed TRON fee calculation.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/TronCalculateFeesResponse" },
                 },
               },
             },
@@ -404,7 +633,22 @@ The single transaction endpoint. The chain family is inferred from the path's co
 Execution flow: derive the wallet from the path, check the token and native balances, estimate fees, build, sign inside the Signer Durable Object, broadcast. \`gasFree: true\` skips the fee pre-check; success returns \`201 {"txId", "fee"}\` with \`fee\` as a decimal string in the native coin.
           `,
           operationId: "createTransactionGlobal",
-          parameters: [createDerivationPathParameter()],
+          parameters: [
+            createDerivationPathParameter(),
+            {
+              name: "Idempotency-Key",
+              in: "header",
+              required: false,
+              description:
+                "Unique key per payout (recommended for every payout). A retry with the same key never sends a second transaction while the first can still land: the service re-broadcasts the same signed bytes and replays completed payouts as 200 {replayed: true}.",
+              schema: {
+                type: "string",
+                maxLength: 128,
+                pattern: "^[\\x21-\\x7E]+$",
+                example: "payout-12345",
+              },
+            },
+          ],
           requestBody: {
             required: true,
             content: {
@@ -469,6 +713,25 @@ Execution flow: derive the wallet from the path, check the token and native bala
                 },
               },
             },
+            "200": {
+              description:
+                "Replay: this Idempotency-Key's payout is already sent or on-chain.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/ReplayedTransactionResponse",
+                  },
+                },
+              },
+            },
+            "409": createErrorResponse(
+              "Idempotency key conflict: used for different parameters, or in use by a concurrent request.",
+              "Idempotency key was already used for a different transaction"
+            ),
+            "503": createErrorResponse(
+              "The payout for this Idempotency-Key is not confirmed yet; retry later with the same key.",
+              "Transaction for this idempotency key is not confirmed yet. Retry later with the same Idempotency-Key."
+            ),
             "400": {
               description:
                 "Malformed path, family not inferable, unknown chainId, validation, balance or build/sign failure.",
@@ -511,10 +774,11 @@ Execution flow: derive the wallet from the path, check the token and native bala
               },
             },
             "502": {
-              description: "Broadcast was not accepted by the network.",
+              description:
+                "Broadcast rejected by the node, or its outcome is unknown (the transaction may be on-chain — see `retryable`).",
               content: {
                 "application/json": {
-                  schema: { $ref: "#/components/schemas/BroadcastErrorResponse" },
+                  schema: { $ref: "#/components/schemas/BroadcastFailureResponse" },
                 },
               },
             },
@@ -760,6 +1024,21 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
             },
           },
         },
+        ReplayedTransactionResponse: {
+          type: "object",
+          required: ["txId", "replayed"],
+          properties: {
+            txId: {
+              type: "string",
+              description: "The transaction this Idempotency-Key resolved to.",
+            },
+            fee: {
+              type: "string",
+              description: "Fee recorded when the payout was first quoted.",
+            },
+            replayed: { type: "boolean", example: true },
+          },
+        },
         TronTransactionBalanceErrorResponse: {
           type: "object",
           required: ["error"],
@@ -813,6 +1092,37 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
               type: "integer",
               description:
                 "ERC20 decimals for interpreting the shortfall amount.",
+            },
+          },
+        },
+        BroadcastFailureResponse: {
+          type: "object",
+          required: ["error", "txId", "retryable", "details"],
+          properties: {
+            error: {
+              type: "string",
+              enum: ["Failed to broadcast transaction", "Broadcast outcome unknown"],
+            },
+            txId: {
+              type: "string",
+              description: "Id of the signed transaction this attempt produced.",
+            },
+            expiresAt: {
+              type: "string",
+              format: "date-time",
+              description:
+                "TRON only: the transaction's expiration; after it plus the settlement window a keyed retry may send a replacement.",
+            },
+            retryable: {
+              type: "boolean",
+              description:
+                "false for deterministic rejections; for 'Broadcast outcome unknown' it is true only when an Idempotency-Key was sent (a keyed retry resends the exact same bytes).",
+            },
+            details: {
+              type: "object",
+              additionalProperties: true,
+              description:
+                "Node/classifier answer: code, message, decodedMessage (TRON).",
             },
           },
         },

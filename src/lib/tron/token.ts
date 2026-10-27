@@ -1,5 +1,9 @@
 import type { TronWeb } from "tronweb";
+import { TRON_CONSTANTS } from "../constants";
+import { errorMessage, InputError, TokenInfoUnavailableError } from "../errors";
 import { cleanString } from "../utils";
+import { callConstant, decodeString, decodeUint } from "./constant";
+import { withTronGridRetry } from "./retry";
 
 export type Trc20TokenInfo = {
   name: string;
@@ -7,79 +11,103 @@ export type Trc20TokenInfo = {
   decimals: number;
 };
 
-const DEFAULT_TOKEN_NAME = "Unknown Token";
-const DEFAULT_TOKEN_SYMBOL = "UNKNOWN";
+// 10^77 is the largest power of ten that fits in uint256.
+const MAX_DECIMALS = 77;
+
+// Answers that retrying cannot change: the address is not a TRC20 token.
+const NOT_A_TOKEN =
+  /Smart contract is not exist|REVERT opcode|returned no usable result|Invalid contract address/i;
+
+/** Tokens this service handles in production: resolved without network calls. */
+const KNOWN_TOKENS: Record<string, Trc20TokenInfo> = {
+  [TRON_CONSTANTS.CONTRACTS.USDT_MAINNET]: {
+    name: "Tether USD",
+    symbol: "USDT",
+    decimals: 6,
+  },
+  [TRON_CONSTANTS.CONTRACTS.USDT_NILE]: {
+    name: "Tether USD",
+    symbol: "USDT",
+    decimals: 6,
+  },
+  [TRON_CONSTANTS.CONTRACTS.A7A5_MAINNET]: {
+    name: "A7A5",
+    symbol: "A7A5",
+    decimals: 6,
+  },
+};
 
 const tokenInfoCache = new Map<string, Trc20TokenInfo>();
 
-function toCleanString(value: unknown, fallback: string): string {
-  if (typeof value === "string") {
-    return cleanString(value) || fallback;
+async function readString(
+  tronWeb: TronWeb,
+  contractAddress: string,
+  functionSelector: string,
+  ownerAddress: string
+): Promise<string | null> {
+  try {
+    const output = await withTronGridRetry(
+      `${functionSelector}(${contractAddress})`,
+      () => callConstant(tronWeb, contractAddress, functionSelector, [], ownerAddress)
+    );
+    return cleanString(decodeString(tronWeb, output));
+  } catch {
+    return null;
   }
-
-  if (
-    value &&
-    typeof value === "object" &&
-    "toString" in value &&
-    typeof value.toString === "function"
-  ) {
-    return cleanString(value.toString()) || fallback;
-  }
-
-  return fallback;
 }
 
+/**
+ * Resolves TRC20 metadata. `decimals` is required: a transient failure throws
+ * TokenInfoUnavailableError (retryable) and a non-token address throws
+ * InputError, never a guess. Only complete results are cached, so a transient
+ * TronGrid failure never sticks to the isolate.
+ */
 export async function getTrc20TokenInfo(
   tronWeb: TronWeb,
   contractAddress: string
 ): Promise<Trc20TokenInfo> {
-  const cached = tokenInfoCache.get(contractAddress);
+  const known = KNOWN_TOKENS[contractAddress] ?? tokenInfoCache.get(contractAddress);
 
-  if (cached) {
-    return cached;
+  if (known) {
+    return known;
   }
 
-  // Decimals scale transfer amounts, so a token whose decimals cannot be read
-  // is rejected instead of silently defaulted — and failures are never cached,
-  // so a transient TronGrid error cannot poison later requests.
-  const contract = await tronWeb.contract().at(contractAddress);
-  const [nameAny, symbolAny, decimalsAny] = await Promise.all([
-    contract
-      .name()
-      .call()
-      .catch(() => DEFAULT_TOKEN_NAME),
-    contract
-      .symbol()
-      .call()
-      .catch(() => DEFAULT_TOKEN_SYMBOL),
-    contract
-      .decimals()
-      .call()
-      .catch(() => {
-        throw new Error(
-          `Unable to read decimals for TRC20 contract ${contractAddress}`
-        );
-      }),
-  ]);
+  const ownerAddress = tronWeb.defaultAddress.base58 || contractAddress;
+  let decimals: number;
 
-  const decimals = Number(
-    typeof decimalsAny === "bigint"
-      ? decimalsAny
-      : decimalsAny?.toString?.() ?? decimalsAny
-  );
+  try {
+    const output = await withTronGridRetry(`decimals(${contractAddress})`, () =>
+      callConstant(tronWeb, contractAddress, "decimals()", [], ownerAddress)
+    );
+    decimals = Number(decodeUint(output));
+  } catch (error) {
+    if (NOT_A_TOKEN.test(errorMessage(error))) {
+      throw new InputError(
+        `${contractAddress} is not a TRC20 token: ${errorMessage(error)}`
+      );
+    }
 
-  if (!Number.isInteger(decimals) || decimals < 0) {
-    throw new Error(
-      `TRC20 contract ${contractAddress} reported invalid decimals`
+    throw new TokenInfoUnavailableError(contractAddress, error);
+  }
+
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > MAX_DECIMALS) {
+    throw new InputError(
+      `${contractAddress} reports unsupported decimals value ${decimals}`
     );
   }
 
+  // Sequential on purpose: parallel bursts trip keyless TronGrid's ~3 req/s.
+  const symbol = await readString(tronWeb, contractAddress, "symbol()", ownerAddress);
+  const name = await readString(tronWeb, contractAddress, "name()", ownerAddress);
   const tokenInfo: Trc20TokenInfo = {
-    name: toCleanString(nameAny, DEFAULT_TOKEN_NAME),
-    symbol: toCleanString(symbolAny, DEFAULT_TOKEN_SYMBOL),
+    name: name || "Unknown Token",
+    symbol: symbol || "UNKNOWN",
     decimals,
   };
 
-  tokenInfoCache.set(contractAddress, tokenInfo);
+  if (symbol !== null && name !== null) {
+    tokenInfoCache.set(contractAddress, tokenInfo);
+  }
+
   return tokenInfo;
 }

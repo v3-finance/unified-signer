@@ -1,3 +1,5 @@
+import { InputError } from "./errors";
+
 export const roundToDecimals = (value: number, decimals: number): number => {
   return Math.round(value * Math.pow(10, decimals)) / Math.pow(10, decimals);
 };
@@ -30,13 +32,13 @@ export function json(
 
 export function decimalToIntegerString(value: string, decimals: number): string {
   if (!/^\d+(\.\d+)?$/.test(value)) {
-    throw new Error("Invalid decimal amount");
+    throw new InputError("Invalid decimal amount");
   }
 
   const [integerPart, fractionalPart = ""] = value.split(".");
 
   if (fractionalPart.length > decimals) {
-    throw new Error(`Too many decimal places (max ${decimals})`);
+    throw new InputError(`Too many decimal places (max ${decimals})`);
   }
 
   const normalized = `${integerPart}${fractionalPart.padEnd(decimals, "0")}`
@@ -58,7 +60,7 @@ export function normalizeTrc20Amount(
 
   if (decimals === undefined) {
     if (!/^\d+$/.test(value)) {
-      throw new Error(
+      throw new InputError(
         "TRC20 amount must be integer base units when decimals are omitted"
       );
     }
@@ -86,4 +88,12 @@ export function formatBaseUnits(value: bigint, decimals: number): string {
   return `${negative ? "-" : ""}${integerPart}${
     fractionalPart ? `.${fractionalPart}` : ""
   }`;
+}
+
+/** Canonical decimal form for fingerprints: "032000.50" -> "32000.5". */
+export function normalizeDecimalString(value: string): string {
+  const [integerPart, fractionalPart = ""] = value.trim().split(".");
+  const integer = integerPart.replace(/^0+(?=\d)/, "");
+  const fraction = fractionalPart.replace(/0+$/, "");
+  return fraction ? `${integer}.${fraction}` : integer;
 }

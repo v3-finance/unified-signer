@@ -64,6 +64,18 @@ The default configuration in `wrangler.jsonc` ships `ethereum` (1), `bsc` (56), 
 - `GasCalculator` Durable Object estimates fees.
 - Worker routes in `src/routes` provide the public HTTP API.
 
+## Legacy compatibility API
+
+The full API of the original cloud-tron-wallet service is served byte-compatibly for existing TRON clients: `GET /wallet/address|balance|history?appId&purpose&asset&stage&index`, `POST /transaction` (Idempotency-Key scoped by appId, numeric `fee`), `POST /calculate/fees` with an explicit `from`, the `/monitor/*` proxy routes (require `MONITOR_CLIENTS_BASE_URL` + `MONITOR_API_KEY`) and `POST /webhook`. These endpoints derive on the ORIGINAL hardened tree `m/44'/195'/{appId}'/{purpose}/{asset}/{stage}/{index}`, so every previously issued deposit address keeps working. The original service's own test suite runs unchanged against this layer.
+
+## Payout safety
+
+- **Idempotency**: send an `Idempotency-Key` header with every payout. A retry with the same key never sends a second transaction while the first can still land — the service re-broadcasts the same signed bytes, replays completed payouts as `200 {"txId", "fee", "replayed": true}`, answers `409` when a key is reused with different parameters, and `503 retryable: true` while the outcome is still unknown.
+- **Broadcast classification**: node answers are classified accepted / rejected / unknown. Rejections carry `retryable` (`false` for deterministic failures such as a bad signature); unknown outcomes return the `txId` so the payout is never silently lost.
+- **Settlement**: a TRON transaction is declared dead only after its expiration plus a 5-minute grace, with solidified blocks covering the inclusion window and no block containing it. An EVM transaction is declared dead only once its nonce is irreversibly consumed by a different transaction with no receipt for ours. Only then is a replacement signed, guarded by compare-and-swap on the stored record.
+- **Unique txIDs**: equal TRON payouts built within one block are re-stamped so they never collapse into one transaction.
+- Never auto-retry a `502` unless it says `retryable: true`. Without an `Idempotency-Key`, treat a `Broadcast outcome unknown` transaction as not sent only after checking its `txId` on-chain.
+
 ## Security notes
 
 - The public API does not expose the mnemonic or raw private keys.
@@ -106,6 +118,7 @@ Set these bindings in your Worker environment:
 - `baseUrl`: public deployment URL used in generated docs.
 - `mnemonic`: seed phrase used for deterministic wallet derivation.
 - `TRONGRID_BASE_URL`: TronGrid base URL.
+- `TRONGRID_API_KEY` (optional secret): TronGrid API key, sent as `TRON-PRO-API-KEY`; without it TronGrid limits the caller to ~3 req/s. Rate-limited calls are retried automatically either way.
 - `EVM_NETWORKS`: JSON array of EVM network definitions (see above).
 - Durable Objects: `TX_BUILDER`, `SIGNER`, `REGISTRY`, `GAS_CALCULATOR`.
 
@@ -177,6 +190,16 @@ curl -X POST "$BASE_URL/transaction/44/195/0" \
 ```
 
 ```bash
+# USDT payout with an idempotency key (recommended for every payout)
+curl -X POST "$BASE_URL/transaction/44/195/0" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: payout-12345" \
+  -d '{"to": "TJRkbhnep1CqUSSKamhDWLpfTGLU2s7se9", "amount": "100.5", "contractAddress": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"}'
+```
+
+Retrying with the same `Idempotency-Key` never sends a second transaction while the first one can still land; a completed payout replays as `200 {"txId", "fee", "replayed": true}`.
+
+```bash
 # USDT on TRON with delegated energy — skip the fee pre-check
 curl -X POST "$BASE_URL/transaction/44/195/0" \
   -H "Content-Type: application/json" \
@@ -225,6 +248,10 @@ Note: EVM fee estimation simulates the transfer via `estimateGas`, so the derive
 | 400 | `{"error": "Insufficient ... balance", "shortfallSun"/"shortfallWei"/"shortfall"}` | Not enough native coin or token |
 | 400 | `{"error": "Insufficient ... to cover amount and fees", "feeSun"/"feeWei"}` | Amount fits, amount + fee does not |
 | 400 | `{"error": "Unable to read token contract", "message"}` | `contractAddress` is not a readable token |
-| 400 | `{"ok": false, "error": "..."}` | Build/sign/estimate rejected by the chain (bad base58, estimateGas revert, ...) |
-| 502 | `{"error": "Failed to broadcast transaction", "details"}` | The network refused the signed transaction |
-| 500 | `{"error": "Internal Server Error"}` | Upstream RPC/TronGrid failure; details in worker logs |
+| 400/502 | `{"error", "stage", "retryable"[, "details"]}` | A pipeline stage failed (Registry/TxBuilder/Signer/GasCalculator); `stage` names it, `retryable` says whether to retry |
+| 409 | `{"error": "Idempotency key ...", "txId", "retryable"}` | Key reused with different parameters, or in use by a concurrent request |
+| 502 | `{"error": "Failed to broadcast transaction", "txId", "retryable", "details"}` | The node rejected the transaction; `retryable: false` means a deterministic failure |
+| 502 | `{"error": "Broadcast outcome unknown", "txId", "retryable", "details"}` | The transaction may be on-chain: retry only with the same `Idempotency-Key` |
+| 503 | `{"error": "... not confirmed yet ...", "txId", "retryable": true}` | Payout for this key is in flight; retry later with the same key |
+| 503 | `{"error": "Failed to broadcast transaction", "details": {"code": "RATE_LIMITED"}}` | The gateway rate-limited the broadcast before any node saw it — safe to retry |
+| 500 | `{"error": "Internal Server Error", "message", "retryable": true}` | Unexpected pre-sign failure — safe to retry; details in worker logs |

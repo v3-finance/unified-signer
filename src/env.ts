@@ -8,6 +8,9 @@ export type Env = {
     baseUrl: string;
     mnemonic: string;
     TRONGRID_BASE_URL: string;
+    TRONGRID_API_KEY?: string;
+    MONITOR_CLIENTS_BASE_URL?: string;
+    MONITOR_API_KEY?: string;
     EVM_NETWORKS: string;
     TX_BUILDER: DurableObjectNamespace<TxBuilder>;
     SIGNER: DurableObjectNamespace<Signer>;
