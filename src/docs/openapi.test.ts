@@ -41,19 +41,53 @@ describe("openapi document", () => {
         "/wallet/history",
         "/transaction",
         "/calculate/fees",
+        "/monitor/{id}/wallets",
+        "/monitor/{id}/add/wallet",
+        "/monitor/{id}/remove/wallet",
+        "/webhook",
       ].sort()
     );
   });
 
-  test("does not document removed network-prefixed or monitoring routes", () => {
+  test("does not document removed network-prefixed routes", () => {
     const document = createOpenApiDocument("https://signer.example", evmNetworks);
     const paths = Object.keys(document.paths);
 
     expect(paths.some((path) => path.includes("{network}"))).toBe(false);
     expect(paths.some((path) => path.startsWith("/tron/"))).toBe(false);
     expect(document.paths["/transaction"].post.tags).toEqual(["Legacy"]);
-    expect(paths.some((path) => path.includes("monitor"))).toBe(false);
-    expect(paths.some((path) => path.includes("webhook"))).toBe(false);
+  });
+
+  test("documents the legacy monitoring and webhook contracts", () => {
+    const document = createOpenApiDocument("https://signer.example", evmNetworks);
+
+    const addWallet = document.paths["/monitor/{id}/wallets"].post;
+    expect(addWallet.tags).toEqual(["Legacy"]);
+    expect(addWallet.responses["503"]).toBeDefined();
+    expect(document.paths["/monitor/{id}/wallets"].delete.responses["200"]).toBeDefined();
+    expect(document.paths["/monitor/{id}/add/wallet"].get.responses["201"]).toBeDefined();
+    expect(document.paths["/monitor/{id}/remove/wallet"].get.responses["200"]).toBeDefined();
+
+    const webhook = document.paths["/webhook"].post;
+    expect(webhook.requestBody.content["application/json"].schema).toEqual({
+      $ref: "#/components/schemas/WebhookPayload",
+    });
+    expect(webhook.responses["201"]).toBeDefined();
+    expect(webhook.responses["400"]).toBeDefined();
+  });
+
+  test("documents the payout error contract on both transaction endpoints", () => {
+    const document = createOpenApiDocument("https://signer.example", evmNetworks);
+
+    for (const path of ["/transaction", "/transaction/{path}"] as const) {
+      const responses = document.paths[path].post.responses as Record<
+        string,
+        unknown
+      >;
+      for (const status of ["400", "409", "502", "503"]) {
+        expect(responses[status]).toBeDefined();
+      }
+    }
   });
 
   test("exposes configured chain ids in the transaction body schema", () => {

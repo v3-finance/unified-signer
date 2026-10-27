@@ -54,6 +54,166 @@ function createErrorResponse(description: string, exampleError: string) {
   };
 }
 
+function createLegacyValidationResponse() {
+  return {
+    description:
+      "Validation failed: the zValidator envelope with the zod issue list JSON-stringified inside `error.message`.",
+    content: {
+      "application/json": {
+        schema: { $ref: "#/components/schemas/LegacyValidationErrorResponse" },
+      },
+    },
+  };
+}
+
+function createIdempotencyConflictResponse() {
+  return {
+    description:
+      "Idempotency key conflict. `retryable: false` — the key was already used for a DIFFERENT transaction (the recorded `txId` is returned); do not retry. `retryable: true` — a concurrent request holds the same key right now; retry shortly with the SAME key.",
+    content: {
+      "application/json": {
+        schema: { $ref: "#/components/schemas/IdempotencyConflictResponse" },
+        examples: {
+          differentTransaction: {
+            value: {
+              error:
+                "Idempotency key was already used for a different transaction",
+              txId: "c5a2f77e8b3d4f1a9b6c8d7e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6",
+              retryable: false,
+            },
+          },
+          concurrentUse: {
+            value: {
+              error:
+                "Idempotency key is being used by another request. Retry later.",
+              retryable: true,
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function createUnconfirmedOrRateLimitedResponse() {
+  return {
+    description:
+      "Either the keyed payout is not confirmed yet (retry later with the SAME Idempotency-Key — the service re-broadcasts the same signed bytes), or the broadcast was rate-limited before reaching a node (the request never left the gateway; retrying is safe).",
+    content: {
+      "application/json": {
+        schema: {
+          oneOf: [
+            { $ref: "#/components/schemas/PendingTransactionResponse" },
+            { $ref: "#/components/schemas/BroadcastFailureResponse" },
+          ],
+        },
+        examples: {
+          notConfirmed: {
+            value: {
+              error:
+                "Transaction for this idempotency key is not confirmed yet. Retry later with the same Idempotency-Key.",
+              txId: "c5a2f77e8b3d4f1a9b6c8d7e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6",
+              retryable: true,
+            },
+          },
+          rateLimited: {
+            value: {
+              error: "Failed to broadcast transaction",
+              txId: "c5a2f77e8b3d4f1a9b6c8d7e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6",
+              retryable: true,
+              details: { code: "RATE_LIMITED" },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function createBroadcastFailureResponse() {
+  return {
+    description:
+      "Broadcast rejected by the node, or its outcome is unknown (the transaction may be on-chain — see `retryable`).",
+    content: {
+      "application/json": {
+        schema: { $ref: "#/components/schemas/BroadcastFailureResponse" },
+      },
+    },
+  };
+}
+
+function createIdempotencyKeyHeader(extraDescription = "") {
+  return {
+    name: "Idempotency-Key",
+    in: "header",
+    required: false,
+    description:
+      "Unique key per payout (recommended for every payout). 1-128 printable ASCII characters without spaces; anything else is rejected with 400. A retry with the same key never sends a second transaction while the first can still land: the service re-broadcasts the same signed bytes and replays completed payouts as 200 {replayed: true}." +
+      extraDescription,
+    schema: {
+      type: "string",
+      minLength: 1,
+      maxLength: 128,
+      pattern: "^[\\x21-\\x7E]+$",
+      example: "payout-12345",
+    },
+  };
+}
+
+function createMonitorIdParameter() {
+  return {
+    name: "id",
+    in: "path",
+    required: true,
+    description: "Monitoring client id whose address list is being changed.",
+    schema: { type: "string" },
+  };
+}
+
+function createMonitorResponses(successStatus: "200" | "201", action: string) {
+  return {
+    [successStatus]: {
+      description: `Address ${action}; the monitoring service confirmed the change.`,
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/MonitorWalletResponse" },
+        },
+      },
+    },
+    "400": createLegacyValidationResponse(),
+    "503": {
+      description:
+        "Monitoring is not configured: the deployment lacks MONITOR_CLIENTS_BASE_URL or MONITOR_API_KEY.",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/ErrorResponse" },
+          examples: {
+            unconfigured: { value: { error: "Monitoring is not configured" } },
+          },
+        },
+      },
+    },
+    "500": {
+      description:
+        "The monitoring service rejected the change or answered with an unexpected shape (standard 500 envelope).",
+      content: {
+        "application/json": {
+          schema: { $ref: "#/components/schemas/ErrorResponse" },
+          examples: {
+            rejected: {
+              value: {
+                error: "Internal Server Error",
+                message: "Monitoring service rejected wallet add request",
+                retryable: true,
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 export function createOpenApiDocument(
   baseUrl: string,
   evmNetworks: EvmNetworkConfig[]
@@ -171,14 +331,18 @@ POST /webhook
 
 Эти эндпоинты работают на ИСХОДНОМ hardened-дереве \`m/44'/195'/{appId}'/{purpose}/{asset}/{stage}/{index}\` — все ранее выданные адреса остаются действительными. Новые интеграции должны использовать глобальные path-эндпоинты выше.
 
+Роуты \`/monitor/*\` проксируют запросы во внешний сервис мониторинга и отвечают \`503 {"error": "Monitoring is not configured"}\`, пока в деплое не заданы \`MONITOR_CLIENTS_BASE_URL\` и \`MONITOR_API_KEY\`. \`POST /webhook\` принимает исходный контракт вебхука о TRON-пополнении и только подтверждает его получение.
+
 ## Идемпотентность и ретраи
 
-Для КАЖДОЙ выплаты рекомендуется заголовок \`Idempotency-Key\` (уникальная строка до 128 печатных ASCII-символов). Гарантии:
+Для КАЖДОЙ выплаты рекомендуется заголовок \`Idempotency-Key\` — уникальная строка из 1–128 печатных ASCII-символов без пробелов (иной формат отклоняется с \`400 Invalid Idempotency-Key header\`). Гарантии:
 
 - Повтор запроса с тем же ключом **никогда не отправляет вторую транзакцию**, пока первая может исполниться: сервис переотправляет ровно те же подписанные байты
 - Уже выполненная выплата отвечает \`200 {"txId", "fee", "replayed": true}\`
-- Ключ, использованный с другими параметрами, отвечает \`409\`
+- Ключ, использованный с другими параметрами, отвечает \`409\` с \`retryable: false\`; конкурентный запрос, прямо сейчас держащий тот же ключ, — \`409\` с \`retryable: true\` (повторите чуть позже)
 - Пока исход неизвестен — \`503\` с \`retryable: true\`: повторяйте позже с тем же ключом
+
+Скоупинг ключей: записи хранятся отдельно для каждой сети (\`tron\` или конкретная EVM-сеть), а отпечаток выплаты включает путь, \`chainId\` (для EVM), получателя, нормализованную сумму и контракт. Один и тот же ключ в разных сетях — две независимые записи: конфликта не будет, но и защиты от дублей между сетями тоже. На legacy-эндпоинте ключи дополнительно скоуплены по \`appId\`.
 
 Семантика «мёртвой» транзакции по семьям сетей:
 
@@ -191,24 +355,35 @@ POST /webhook
 
 | Код | Тело | Когда |
 |---|---|---|
-| 400 | \`{"error": "Validation Error", "details": [...]}\` | Невалидные параметры, адреса, checksum, сырой путь в query/body |
+| 400 | \`{"error": "Validation Error", "details": [...], "retryable": false}\` | Невалидные параметры, адреса, checksum, сырой путь в query/body |
+| 400 | \`{"error": "Request body must be valid JSON", "retryable": false}\` | Тело POST-запроса — не валидный JSON |
+| 400 | \`{"error": "Invalid Idempotency-Key header", "details", "retryable": false}\` | Ключ не из 1–128 печатных ASCII-символов без пробелов |
 | 400 | \`{"error": "Too many decimal places (max N)"}\` | Слишком много дробных знаков в \`amount\` |
 | 400 | \`{"error": "Insufficient TRX balance", "shortfallSun"}\` | Не хватает TRX на сумму |
 | 400 | \`{"error": "Insufficient <SYMBOL> balance", "shortfallWei"}\` | Не хватает нативной EVM-монеты на сумму |
 | 400 | \`{"error": "Insufficient TRC20/ERC20 balance", "shortfall", "token", "decimals"}\` | Не хватает токена |
 | 400 | \`{"error": "Insufficient ... to cover amount and fees", "feeSun"/"feeWei"}\` | Сумма проходит, сумма+комиссия — нет |
-| 400 | \`{"error": "Unable to read token contract", "message"}\` | \`contractAddress\` — не читаемый токен-контракт |
+| 400 | \`{"error": "Unable to read token contract ..."}\` | \`contractAddress\` — не читаемый токен-контракт (детерминированный отказ) |
 | 400 | \`{"error": "Invalid path segment ..."}\` | Ошибка в сыром пути (не число, маркер харденинга, глубина, диапазон) |
 | 400 | \`{"error": "Unknown chainId ...", "availableChainIds": [...]}\` | \`chainId\` не соответствует ни одной сконфигурированной EVM-сети |
-| 400/502 | \`{"error", "stage", "retryable"[, "details"]}\` | Отказ стадии пайплайна (Registry/TxBuilder/Signer/GasCalculator): \`stage\` называет её, \`retryable\` — можно ли повторять |
-| 404 | \`{"error": "Unknown network ...", "availableNetworks": [...]}\` | Неизвестный ключ сети |
+| 400/409/500/502/503 | \`{"error", "stage", "retryable"[, "details"]}\` | Отказ стадии пайплайна: \`stage\` — \`НЕЙМСПЕЙС/роут\` (например \`REGISTRY/getBalance\`, \`GAS_CALCULATOR/calculate\`); статус стадии сохраняется (прочие коды → 502), \`retryable: true\` только при статусе ≥ 500 |
+| 404 | текст \`404 Not Found\` (не JSON) | Запрос на несуществующий путь |
 | 409 | \`{"error": "Idempotency key was already used...", "txId", "retryable": false}\` | Ключ использован с другими параметрами выплаты |
 | 409 | \`{"error": "Idempotency key is being used by another request...", "retryable": true}\` | Конкурентный запрос с тем же ключом подписывает прямо сейчас |
 | 502 | \`{"error": "Failed to broadcast transaction", "txId", "retryable", "details"}\` | Нода отклонила транзакцию; \`retryable: false\` — детерминированный отказ |
 | 502 | \`{"error": "Broadcast outcome unknown", "txId", "retryable", "details"}\` | Исход неизвестен: с ключом повторяйте (переотправятся те же байты), без ключа — проверяйте txId |
 | 503 | \`{"error": "...not confirmed yet...", "txId", "retryable": true}\` | Транзакция по ключу ещё в полёте; повторите позже с тем же ключом |
 | 503 | \`{"error": "Failed to broadcast transaction", "txId", "retryable": true, "details": {"code": "RATE_LIMITED"}}\` | Шлюз не пропустил broadcast из-за rate limit — до ноды запрос не дошёл, повтор безопасен |
+| 503 | \`{"error": "Unable to read TRC20 token info for ...", "retryable": true}\` | Временный сбой чтения метаданных токена или rate limit RPC — повтор безопасен |
+| 503 | \`{"error": "Monitoring is not configured"}\` | \`/monitor/*\` при незаданных \`MONITOR_CLIENTS_BASE_URL\`/\`MONITOR_API_KEY\` |
 | 500 | \`{"error": "Internal Server Error", "message", "retryable": true}\` | Непредвиденный сбой до подписи — повтор безопасен; детали в логах воркера |
+
+Форматы ошибок валидации различаются по слоям API:
+
+- Глобальные path-эндпоинты: \`{"error": "Validation Error", "details": [...], "retryable": false}\`
+- Legacy GET-эндпоинты, \`POST /transaction\` и \`/monitor/*\`: конверт zValidator \`{"success": false, "error": {"name": "ZodError", "message": "<JSON-строка с issues>"}}\`
+- Legacy \`POST /calculate/fees\`: \`{"success": false, "error": {"message": "Validation error", "issues": [{"field", "message", "code"}]}}\`
+- \`POST /webhook\`: \`{"ok": false, "error": "Validation Error", "details": [...]}\`
 
 ## Архитектура
 
@@ -361,6 +536,7 @@ POST /webhook
                 },
               },
             },
+            "400": createLegacyValidationResponse(),
           },
         },
       },
@@ -387,6 +563,7 @@ POST /webhook
                 },
               },
             },
+            "400": createLegacyValidationResponse(),
           },
         },
       },
@@ -408,13 +585,23 @@ POST /webhook
           ],
           responses: {
             "200": {
-              description: "Transfers, newest first.",
+              description:
+                "Transfers, newest first: TRC20 items when contractAddress is given, TRX items otherwise.",
               content: {
                 "application/json": {
-                  schema: { type: "array", items: { type: "object", additionalProperties: true } },
+                  schema: {
+                    type: "array",
+                    items: {
+                      oneOf: [
+                        { $ref: "#/components/schemas/Trc20TransferItem" },
+                        { $ref: "#/components/schemas/TrxTransferItem" },
+                      ],
+                    },
+                  },
                 },
               },
             },
+            "400": createLegacyValidationResponse(),
           },
         },
       },
@@ -427,12 +614,9 @@ POST /webhook
           operationId: "legacyCreateTransaction",
           parameters: [
             ...createLegacyQueryParameters(),
-            {
-              name: "Idempotency-Key",
-              in: "header",
-              required: false,
-              schema: { type: "string", maxLength: 128 },
-            },
+            createIdempotencyKeyHeader(
+              " Keys are additionally scoped by appId, so different apps can never collide."
+            ),
           ],
           requestBody: {
             required: true,
@@ -475,6 +659,29 @@ POST /webhook
                 },
               },
             },
+            "400": {
+              description:
+                "Query/body/header validation failure (zValidator envelope), invalid Idempotency-Key, insufficient balance, or a build/sign failure.",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [
+                      {
+                        $ref: "#/components/schemas/LegacyValidationErrorResponse",
+                      },
+                      {
+                        $ref: "#/components/schemas/TronTransactionBalanceErrorResponse",
+                      },
+                      { $ref: "#/components/schemas/ErrorResponse" },
+                      { $ref: "#/components/schemas/StageErrorResponse" },
+                    ],
+                  },
+                },
+              },
+            },
+            "409": createIdempotencyConflictResponse(),
+            "502": createBroadcastFailureResponse(),
+            "503": createUnconfirmedOrRateLimitedResponse(),
           },
         },
       },
@@ -487,7 +694,7 @@ POST /webhook
             required: true,
             content: {
               "application/json": {
-                schema: { $ref: "#/components/schemas/CalculateFeesByPathRequest" },
+                schema: { $ref: "#/components/schemas/LegacyCalculateFeesRequest" },
                 examples: {
                   trx: {
                     value: {
@@ -506,6 +713,178 @@ POST /webhook
               content: {
                 "application/json": {
                   schema: { $ref: "#/components/schemas/TronCalculateFeesResponse" },
+                },
+              },
+            },
+            "400": {
+              description:
+                "Validation failed: missing/invalid fields, from == to, or contract equal to one of the parties.",
+              content: {
+                "application/json": {
+                  schema: {
+                    $ref: "#/components/schemas/LegacyFeesValidationErrorResponse",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      "/monitor/{id}/wallets": {
+        post: {
+          tags: ["Legacy"],
+          summary: "Legacy: start monitoring a TRON address",
+          description:
+            "Proxies to the monitoring service configured via MONITOR_CLIENTS_BASE_URL/MONITOR_API_KEY. Answers 503 while monitoring is not configured.",
+          operationId: "legacyMonitorAddWalletBody",
+          parameters: [createMonitorIdParameter()],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["address"],
+                  properties: {
+                    address: { $ref: "#/components/schemas/TronAddress" },
+                  },
+                },
+              },
+            },
+          },
+          responses: createMonitorResponses("201", "added to monitoring"),
+        },
+        delete: {
+          tags: ["Legacy"],
+          summary: "Legacy: stop monitoring a TRON address",
+          description:
+            "Proxies to the monitoring service. Answers 503 while monitoring is not configured.",
+          operationId: "legacyMonitorRemoveWalletBody",
+          parameters: [createMonitorIdParameter()],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["address"],
+                  properties: {
+                    address: { $ref: "#/components/schemas/TronAddress" },
+                  },
+                },
+              },
+            },
+          },
+          responses: createMonitorResponses("200", "removed from monitoring"),
+        },
+      },
+      "/monitor/{id}/add/wallet": {
+        get: {
+          tags: ["Legacy"],
+          summary: "Legacy: start monitoring a TRON address (query variant)",
+          description:
+            "GET variant of POST /monitor/{id}/wallets with the address in the query string.",
+          operationId: "legacyMonitorAddWalletQuery",
+          parameters: [
+            createMonitorIdParameter(),
+            {
+              name: "address",
+              in: "query",
+              required: true,
+              schema: { $ref: "#/components/schemas/TronAddress" },
+            },
+          ],
+          responses: createMonitorResponses("201", "added to monitoring"),
+        },
+      },
+      "/monitor/{id}/remove/wallet": {
+        get: {
+          tags: ["Legacy"],
+          summary: "Legacy: stop monitoring a TRON address (query variant)",
+          description:
+            "GET variant of DELETE /monitor/{id}/wallets with the address in the query string.",
+          operationId: "legacyMonitorRemoveWalletQuery",
+          parameters: [
+            createMonitorIdParameter(),
+            {
+              name: "address",
+              in: "query",
+              required: true,
+              schema: { $ref: "#/components/schemas/TronAddress" },
+            },
+          ],
+          responses: createMonitorResponses("200", "removed from monitoring"),
+        },
+      },
+      "/webhook": {
+        post: {
+          tags: ["Legacy"],
+          summary: "Legacy: receive a TRON top-up webhook",
+          description:
+            "Accepts the original monitoring webhook contract and acknowledges it. The payload is validated and acknowledged only — the service performs no further processing.",
+          operationId: "legacyWebhook",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/WebhookPayload" },
+              },
+            },
+          },
+          responses: {
+            "201": {
+              description: "Payload accepted.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["ok", "id"],
+                    properties: {
+                      ok: { type: "boolean", const: true },
+                      id: {
+                        type: "string",
+                        description: "The transaction id echoed back.",
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            "400": {
+              description: "Payload failed validation.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["ok", "error", "details"],
+                    properties: {
+                      ok: { type: "boolean", const: false },
+                      error: { type: "string", const: "Validation Error" },
+                      details: {
+                        type: "array",
+                        items: { type: "object", additionalProperties: true },
+                        description: "Zod issues.",
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            "500": {
+              description: "Non-JSON body or processing failure.",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["ok", "error"],
+                    properties: {
+                      ok: { type: "boolean", const: false },
+                      error: {
+                        type: "string",
+                        const: "Webhook processing failed",
+                      },
+                    },
+                  },
                 },
               },
             },
@@ -547,10 +926,32 @@ Raw paths are always non-hardened (\`/44/60/0\` derives \`m/44/60/0\`); hardenin
                 },
               },
             },
-            "400": createErrorResponse(
-              "Malformed path or family cannot be inferred.",
-              "Cannot infer the network family from this path. The path must start with 44/60 (EVM) or 44/195 (TRON)."
-            ),
+            "400": {
+              description:
+                "Malformed path (hardened marker, non-numeric segment, depth or index range), family not inferable, or no EVM networks configured.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/ErrorResponse" },
+                  examples: {
+                    family: {
+                      value: {
+                        error:
+                          "Cannot infer the network family from this path. The path must start with 44/60 (EVM) or 44/195 (TRON).",
+                      },
+                    },
+                    hardened: {
+                      value: {
+                        error:
+                          'Invalid path segment "44h": hardened segments are not supported, use plain indexes',
+                      },
+                    },
+                    noEvmNetworks: {
+                      value: { error: "No EVM networks are configured" },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -613,10 +1014,39 @@ The balance endpoint: the chain family is inferred from the path's coin type.
                 },
               },
             },
-            "400": createErrorResponse(
-              "Malformed path, missing/unknown chainId, or invalid contract address.",
-              "The chainId query parameter is required for EVM balances"
-            ),
+            "400": {
+              description:
+                "Malformed path, missing or unknown chainId, or invalid contract address.",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [
+                      { $ref: "#/components/schemas/ErrorResponse" },
+                      { $ref: "#/components/schemas/ChainIdErrorResponse" },
+                    ],
+                  },
+                  examples: {
+                    chainIdRequired: {
+                      value: {
+                        error:
+                          "The chainId query parameter is required for EVM balances",
+                        availableChainIds: evmNetworks.map(
+                          (network) => network.chainId
+                        ),
+                      },
+                    },
+                    unknownChainId: {
+                      value: {
+                        error: "Unknown chainId 10",
+                        availableChainIds: evmNetworks.map(
+                          (network) => network.chainId
+                        ),
+                      },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -635,19 +1065,9 @@ Execution flow: derive the wallet from the path, check the token and native bala
           operationId: "createTransactionGlobal",
           parameters: [
             createDerivationPathParameter(),
-            {
-              name: "Idempotency-Key",
-              in: "header",
-              required: false,
-              description:
-                "Unique key per payout (recommended for every payout). A retry with the same key never sends a second transaction while the first can still land: the service re-broadcasts the same signed bytes and replays completed payouts as 200 {replayed: true}.",
-              schema: {
-                type: "string",
-                maxLength: 128,
-                pattern: "^[\\x21-\\x7E]+$",
-                example: "payout-12345",
-              },
-            },
+            createIdempotencyKeyHeader(
+              " Records are kept per network: the same key on different chains is two independent records (no conflict, but no cross-chain replay protection either)."
+            ),
           ],
           requestBody: {
             required: true,
@@ -724,35 +1144,66 @@ Execution flow: derive the wallet from the path, check the token and native bala
                 },
               },
             },
-            "409": createErrorResponse(
-              "Idempotency key conflict: used for different parameters, or in use by a concurrent request.",
-              "Idempotency key was already used for a different transaction"
-            ),
-            "503": createErrorResponse(
-              "The payout for this Idempotency-Key is not confirmed yet; retry later with the same key.",
-              "Transaction for this idempotency key is not confirmed yet. Retry later with the same Idempotency-Key."
-            ),
+            "409": createIdempotencyConflictResponse(),
+            "503": createUnconfirmedOrRateLimitedResponse(),
             "400": {
               description:
-                "Malformed path, family not inferable, unknown chainId, validation, balance or build/sign failure.",
+                "Malformed path, family not inferable, non-JSON body, invalid Idempotency-Key, unknown chainId, validation, balance or build/sign failure.",
               content: {
                 "application/json": {
                   schema: {
                     oneOf: [
                       { $ref: "#/components/schemas/ErrorResponse" },
+                      { $ref: "#/components/schemas/ChainIdErrorResponse" },
                       {
                         $ref: "#/components/schemas/TronTransactionBalanceErrorResponse",
                       },
                       {
                         $ref: "#/components/schemas/EvmTransactionBalanceErrorResponse",
                       },
+                      { $ref: "#/components/schemas/StageErrorResponse" },
                     ],
                   },
                   examples: {
+                    invalidJson: {
+                      value: {
+                        error: "Request body must be valid JSON",
+                        retryable: false,
+                      },
+                    },
+                    validation: {
+                      value: {
+                        error: "Validation Error",
+                        details: [
+                          {
+                            code: "invalid_type",
+                            path: ["to"],
+                            message:
+                              "Invalid input: expected string, received undefined",
+                          },
+                        ],
+                        retryable: false,
+                      },
+                    },
+                    invalidIdempotencyKey: {
+                      value: {
+                        error: "Invalid Idempotency-Key header",
+                        details: [
+                          {
+                            code: "invalid_format",
+                            message:
+                              "Idempotency key must be printable ASCII without spaces",
+                          },
+                        ],
+                        retryable: false,
+                      },
+                    },
                     unknownChainId: {
                       value: {
                         error: "Unknown chainId 10",
-                        availableChainIds: [1, 56, 137, 8453],
+                        availableChainIds: evmNetworks.map(
+                          (network) => network.chainId
+                        ),
                       },
                     },
                     nativeShortfall: {
@@ -773,15 +1224,7 @@ Execution flow: derive the wallet from the path, check the token and native bala
                 },
               },
             },
-            "502": {
-              description:
-                "Broadcast rejected by the node, or its outcome is unknown (the transaction may be on-chain — see `retryable`).",
-              content: {
-                "application/json": {
-                  schema: { $ref: "#/components/schemas/BroadcastFailureResponse" },
-                },
-              },
-            },
+            "502": createBroadcastFailureResponse(),
           },
         },
       },
@@ -839,10 +1282,39 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
                 },
               },
             },
-            "400": createErrorResponse(
-              "Malformed path, family not inferable, unknown chainId, or validation failure.",
-              "Validation Error"
-            ),
+            "400": {
+              description:
+                "Malformed path, family not inferable, non-JSON body, unknown chainId, or validation failure. Refinement violations (from == to, contract equal to a party) surface as a GAS_CALCULATOR stage envelope.",
+              content: {
+                "application/json": {
+                  schema: {
+                    oneOf: [
+                      { $ref: "#/components/schemas/ErrorResponse" },
+                      { $ref: "#/components/schemas/ChainIdErrorResponse" },
+                      { $ref: "#/components/schemas/StageErrorResponse" },
+                    ],
+                  },
+                  examples: {
+                    unknownChainId: {
+                      value: {
+                        error: "Unknown chainId 10",
+                        availableChainIds: evmNetworks.map(
+                          (network) => network.chainId
+                        ),
+                        retryable: false,
+                      },
+                    },
+                    stageRefinement: {
+                      value: {
+                        error: "Validation Error",
+                        stage: "GAS_CALCULATOR/calculate",
+                        retryable: false,
+                      },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -887,6 +1359,228 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
               description:
                 "Optional list of validation issues when the error was produced by schema validation.",
             },
+            retryable: {
+              type: "boolean",
+              description:
+                "Present on most error bodies: whether repeating the same request may succeed.",
+            },
+            message: {
+              type: "string",
+              description:
+                "Present on 500 responses: redacted description of the internal failure.",
+            },
+          },
+        },
+        ChainIdErrorResponse: {
+          type: "object",
+          required: ["error", "availableChainIds"],
+          properties: {
+            error: {
+              type: "string",
+              example: "The chainId query parameter is required for EVM balances",
+            },
+            availableChainIds: {
+              type: "array",
+              items: { type: "integer" },
+              description: "Chain ids of every configured EVM network.",
+            },
+            retryable: { type: "boolean" },
+          },
+        },
+        StageErrorResponse: {
+          type: "object",
+          required: ["error", "stage", "retryable"],
+          description:
+            "A pipeline stage refused the request. `stage` is `NAMESPACE/route`, e.g. `REGISTRY/getBalance`, `TX_BUILDER/evmTxBuild`, `SIGNER/sign`, `GAS_CALCULATOR/calculate`. The stage's own status (400, 409, 500, 503) is preserved; anything else maps to 502. `retryable` is true only for statuses >= 500.",
+          properties: {
+            error: { type: "string" },
+            stage: { type: "string", example: "GAS_CALCULATOR/calculate" },
+            retryable: { type: "boolean" },
+            details: {
+              description:
+                "Optional issues forwarded from the stage (e.g. validation details).",
+            },
+          },
+        },
+        IdempotencyConflictResponse: {
+          type: "object",
+          required: ["error", "retryable"],
+          description:
+            "409 body. Variant 1: the key was already used for a DIFFERENT transaction — `txId` is the recorded transaction, `retryable: false`. Variant 2: a concurrent request holds the same key right now — `retryable: true`, retry shortly with the same key.",
+          properties: {
+            error: { type: "string" },
+            txId: { type: "string" },
+            retryable: { type: "boolean" },
+          },
+        },
+        PendingTransactionResponse: {
+          type: "object",
+          required: ["error", "retryable"],
+          description:
+            "The keyed payout's outcome is not decided yet. Retry later with the SAME Idempotency-Key; the service re-broadcasts the same signed bytes.",
+          properties: {
+            error: { type: "string" },
+            txId: { type: "string" },
+            expiresAt: {
+              type: "string",
+              description: "TRON only: the recorded transaction's expiration.",
+            },
+            retryable: { type: "boolean", const: true },
+          },
+        },
+        LegacyValidationErrorResponse: {
+          type: "object",
+          required: ["success", "error"],
+          description:
+            "Validation envelope of the legacy GET endpoints, POST /transaction (query, body and header) and the monitor routes: the zod error with the issue list JSON-stringified inside `error.message`.",
+          properties: {
+            success: { type: "boolean", const: false },
+            error: {
+              type: "object",
+              required: ["name", "message"],
+              properties: {
+                name: { type: "string", const: "ZodError" },
+                message: {
+                  type: "string",
+                  description: "JSON-stringified array of zod issues.",
+                },
+              },
+            },
+          },
+        },
+        LegacyFeesValidationErrorResponse: {
+          type: "object",
+          required: ["success", "error"],
+          description: "Validation envelope of legacy POST /calculate/fees.",
+          properties: {
+            success: { type: "boolean", const: false },
+            error: {
+              type: "object",
+              required: ["message", "issues"],
+              properties: {
+                message: { type: "string", const: "Validation error" },
+                issues: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    required: ["field", "message", "code"],
+                    properties: {
+                      field: { type: "string" },
+                      message: { type: "string" },
+                      code: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        LegacyCalculateFeesRequest: {
+          type: "object",
+          required: ["from", "to", "amount"],
+          description:
+            "Legacy fee calculation with an explicit sender. `from` and `to` must differ, and `contract` must not equal either of them; violations are rejected with 400.",
+          properties: {
+            from: { $ref: "#/components/schemas/TronAddress" },
+            to: { $ref: "#/components/schemas/TronAddress" },
+            amount: { $ref: "#/components/schemas/AmountString" },
+            contract: {
+              allOf: [{ $ref: "#/components/schemas/TronAddress" }],
+              description:
+                "Optional TRC20 contract address. If omitted, the calculation is for a native TRX transfer.",
+            },
+          },
+        },
+        MonitorWalletResponse: {
+          type: "object",
+          required: ["ok", "receivers"],
+          properties: {
+            ok: { type: "boolean", const: true },
+            receivers: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Every address monitored for this client after the change.",
+            },
+          },
+        },
+        WebhookPayload: {
+          type: "object",
+          required: [
+            "network",
+            "asset",
+            "contract",
+            "type",
+            "id",
+            "block",
+            "from",
+            "to",
+            "value",
+            "timestamp",
+          ],
+          properties: {
+            network: { type: "string", const: "TRON" },
+            asset: { type: "string", enum: ["A7A5", "USDT", "TRX"] },
+            contract: {
+              type: "string",
+              enum: [
+                "TLeVfrdym8RoJreJ23dAGyfJDygRtiWKBZ",
+                USDT_TRON_CONTRACT,
+                "native",
+              ],
+              description:
+                "Token contract of the transfer, or `native` for TRX.",
+            },
+            type: { type: "string", const: "TOPUP" },
+            id: { type: "string", description: "Transaction id of the top-up." },
+            block: { type: "number" },
+            from: { $ref: "#/components/schemas/TronAddress" },
+            to: { $ref: "#/components/schemas/TronAddress" },
+            value: {
+              type: "integer",
+              minimum: 0,
+              description: "Amount in base units of the asset.",
+            },
+            timestamp: { type: "number" },
+          },
+        },
+        TrxTransferItem: {
+          type: "object",
+          required: ["txID", "timestamp", "from", "to", "amountSun", "direction"],
+          properties: {
+            txID: { type: "string" },
+            timestamp: { type: "number" },
+            from: { $ref: "#/components/schemas/TronAddress" },
+            to: { $ref: "#/components/schemas/TronAddress" },
+            amountSun: { type: "string", description: "Transfer amount in SUN." },
+            direction: { type: "string", enum: ["in", "out"] },
+          },
+        },
+        Trc20TransferItem: {
+          type: "object",
+          required: [
+            "txID",
+            "timestamp",
+            "from",
+            "to",
+            "amountSun",
+            "contractAddress",
+            "direction",
+          ],
+          properties: {
+            txID: { type: "string" },
+            timestamp: { type: "number" },
+            from: { $ref: "#/components/schemas/TronAddress" },
+            to: { $ref: "#/components/schemas/TronAddress" },
+            amountSun: {
+              type: "string",
+              description:
+                "Transfer amount in token base units (legacy field name).",
+            },
+            contractAddress: { $ref: "#/components/schemas/TronAddress" },
+            tokenSymbol: { type: "string" },
+            tokenDecimals: { type: "integer" },
+            direction: { type: "string", enum: ["in", "out"] },
           },
         },
         WalletAddressByPathResponse: {
@@ -952,7 +1646,7 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
             contractAddress: {
               allOf: [{ $ref: "#/components/schemas/TronAddress" }],
               description:
-                "Optional TRC20 contract address. Omit for native TRX transfers.",
+                'Optional TRC20 contract address. Omit for native TRX transfers; the literal values `""`, `"undefined"` and `null` are tolerated and treated as absent.',
             },
             gasFree: {
               type: "boolean",
@@ -977,7 +1671,7 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
             contractAddress: {
               allOf: [{ $ref: "#/components/schemas/EvmAddress" }],
               description:
-                "Optional ERC20 contract address. Omit for native coin transfers.",
+                'Optional ERC20 contract address. Omit for native coin transfers; the literal values `""`, `"undefined"` and `null` are tolerated and treated as absent.',
             },
             gasFree: {
               type: "boolean",
@@ -1026,17 +1720,18 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
         },
         ReplayedTransactionResponse: {
           type: "object",
-          required: ["txId", "replayed"],
+          required: ["txId", "fee", "replayed"],
           properties: {
             txId: {
               type: "string",
               description: "The transaction this Idempotency-Key resolved to.",
             },
             fee: {
-              type: "string",
-              description: "Fee recorded when the payout was first quoted.",
+              oneOf: [{ type: "string" }, { type: "number" }],
+              description:
+                "Fee recorded when the payout was first quoted: a decimal string on the global endpoint, a number on the legacy endpoint.",
             },
-            replayed: { type: "boolean", example: true },
+            replayed: { type: "boolean", const: true },
           },
         },
         TronTransactionBalanceErrorResponse: {
@@ -1123,25 +1818,6 @@ The fee-calculation endpoint: \`from\` is derived from the path, the family from
               additionalProperties: true,
               description:
                 "Node/classifier answer: code, message, decodedMessage (TRON).",
-            },
-          },
-        },
-        BroadcastErrorResponse: {
-          type: "object",
-          required: ["error", "details"],
-          properties: {
-            error: {
-              type: "string",
-              example: "Failed to broadcast transaction",
-            },
-            details: {
-              type: "object",
-              properties: {
-                result: { type: "boolean", nullable: true },
-                txid: { type: "string", nullable: true },
-                code: { type: "string", nullable: true },
-                message: { type: "string", nullable: true },
-              },
             },
           },
         },
