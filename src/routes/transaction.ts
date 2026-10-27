@@ -115,28 +115,6 @@ async function markBroadcast(wallet: Wallet, key: string, txId: string) {
   }
 }
 
-/**
- * Rolls back a nonce reservation whose transaction was abandoned before any
- * node could have seen it. Best effort: a failed rollback only leaves a gap
- * that the stale-queue healing closes later.
- */
-async function releaseAbandonedEvmNonce(
-  wallet: Wallet,
-  config: EvmNetworkConfig,
-  address: `0x${string}`,
-  nonce: number
-) {
-  try {
-    await wallet.txBuilder().releaseEvmNonce({
-      network: config.key,
-      address,
-      nonce,
-    });
-  } catch (error) {
-    console.error("[transaction] nonce release failed", error);
-  }
-}
-
 /** Reads and validates the Idempotency-Key header; undefined when absent. */
 function readIdempotencyKey(
   c: Context<Env, string>
@@ -698,7 +676,6 @@ async function sendNewEvmTransaction(
     );
   }
 
-  const builtNonce = txBuilder.transaction.nonce;
   let signed;
 
   try {
@@ -710,9 +687,6 @@ async function sendNewEvmTransaction(
         : undefined,
     });
   } catch (error) {
-    // The built transaction is abandoned on every error path below.
-    await releaseAbandonedEvmNonce(wallet, config, senderAddress, builtNonce);
-
     if (idempotencyKey && error instanceof DOCallError && error.status === 409) {
       const { record } = await wallet
         .signer()
@@ -746,7 +720,6 @@ async function sendNewEvmTransaction(
   }
 
   if (!signed.ok || !signed.rawTransaction || !signed.txId) {
-    await releaseAbandonedEvmNonce(wallet, config, senderAddress, builtNonce);
     return c.json(
       {
         error: signed.error ?? "Failed to sign transaction",
@@ -769,10 +742,6 @@ async function sendNewEvmTransaction(
     return c.json({ txId, fee }, 201);
   }
 
-  if (outcome.status === "rejected" && !idempotencyKey) {
-    // Without a key nothing stores these bytes, so the slot is abandoned.
-    await releaseAbandonedEvmNonce(wallet, config, senderAddress, builtNonce);
-  }
 
   return evmBroadcastFailure(c, outcome, txId, idempotencyKey);
 }

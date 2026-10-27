@@ -59,7 +59,7 @@ The default configuration in `wrangler.jsonc` ships `ethereum` (1), `bsc` (56), 
 ## Architecture
 
 - `Registry` Durable Object derives addresses and reads balances.
-- `TxBuilder` Durable Object builds TRON and EVM transactions; for EVM it reserves nonces in DO storage so concurrent sends from one address do not collide.
+- `TxBuilder` Durable Object builds TRON and EVM transactions. EVM nonces come straight from the chain's pending count, like a regular wallet: fire payouts from one wallet sequentially — two truly concurrent sends may take the same nonce and one will replace the other.
 - `Signer` Durable Object signs transactions directly from the mnemonic without exposing private keys.
 - `GasCalculator` Durable Object estimates fees.
 - Worker routes in `src/routes` provide the public HTTP API.

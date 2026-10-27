@@ -28,11 +28,6 @@ export const DO_ROUTES = {
       body: schemas.EvmTxBuildRequestSchema,
       response: schemas.EvmTxBuildResponseSchema,
     },
-    "/evmReleaseNonce": {
-      method: "POST" as const,
-      body: schemas.EvmNonceReleaseRequestSchema,
-      response: schemas.IdempotencyMutationResponseSchema,
-    },
   },
   SIGNER: {
     "/sign": {
@@ -231,12 +226,6 @@ export class TxBuilderClient extends BaseDOClient<"TX_BUILDER"> {
     data: z.input<typeof schemas.EvmTxBuildRequestSchema>
   ): Promise<schemas.EvmTxBuildResponse> {
     return this.call("/evmTxBuild", { body: data });
-  }
-
-  async releaseEvmNonce(
-    data: z.input<typeof schemas.EvmNonceReleaseRequestSchema>
-  ): Promise<z.infer<typeof schemas.IdempotencyMutationResponseSchema>> {
-    return this.call("/evmReleaseNonce", { body: data });
   }
 }
 

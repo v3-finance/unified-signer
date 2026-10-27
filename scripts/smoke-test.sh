@@ -258,40 +258,13 @@ send_and_replay "USDT(Base) $USDT_EVM_AMOUNT A->B" "/transaction/$EVM_PATH_A" \
   "{\"chainId\":$CHAIN_ID,\"to\":\"$B_EVM\",\"amount\":\"$USDT_EVM_AMOUNT\",\"contractAddress\":\"$USDT_EVM\"}" "$RUN_ID-usdt-evm" \
   "https://basescan.org/tx/" || true
 
-say "[6] Concurrent EVM sends (nonce reservation)"
-par_send() { # KEY AMOUNT OUTFILE — isolated curl so parallel jobs don't share state
-  local attempt=0
-  while [ $attempt -lt 2 ]; do
-    curl -sS -m 90 -X POST "$BASE_URL/transaction/$EVM_PATH_A" \
-      ${AUTH_ID:+-H "CF-Access-Client-Id: $AUTH_ID"} \
-      ${AUTH_ID:+-H "CF-Access-Client-Secret: $AUTH_SECRET"} \
-      -H "Content-Type: application/json" -H "Idempotency-Key: $1" \
-      -d "{\"chainId\":$CHAIN_ID,\"to\":\"$B_EVM\",\"amount\":\"$2\"}" > "$3" 2>/dev/null
-    # Public RPCs rate-limit concurrent fee estimations; one retryable
-    # pre-sign failure gets a second chance with the SAME key (always safe).
-    if jq -e '.txId // empty' "$3" >/dev/null 2>&1; then
-      return 0
-    fi
-    if ! jq -e 'select(.retryable == true)' "$3" >/dev/null 2>&1; then
-      return 0
-    fi
-    attempt=$((attempt + 1)); sleep 5
-  done
-}
-par_send "$RUN_ID-par-1" "0.00001" "$TMP/par1.json" &
-PID1=$!
-par_send "$RUN_ID-par-2" "0.00002" "$TMP/par2.json" &
-PID2=$!
-wait "$PID1" 2>/dev/null || true
-wait "$PID2" 2>/dev/null || true
-TX1="$(jq -r '.txId // empty' "$TMP/par1.json" 2>/dev/null)"
-TX2="$(jq -r '.txId // empty' "$TMP/par2.json" 2>/dev/null)"
-if [ -n "$TX1" ] && [ -n "$TX2" ] && [ "$TX1" != "$TX2" ]; then
-  ok "two concurrent payouts got DISTINCT transactions: $TX1 / $TX2"
-  printf 'par-1  https://basescan.org/tx/%s\npar-2  https://basescan.org/tx/%s\n' "$TX1" "$TX2" >> "$TXLOG"
-else
-  bad "concurrent sends: tx1=${TX1:-?} tx2=${TX2:-?} (bodies: $(cat "$TMP/par1.json" 2>/dev/null) | $(cat "$TMP/par2.json" 2>/dev/null))"
-fi
+say "[6] Two back-to-back EVM payouts (distinct keys)"
+send_and_replay "ETH micro #1 A->B" "/transaction/$EVM_PATH_A" \
+  "{\"chainId\":$CHAIN_ID,\"to\":\"$B_EVM\",\"amount\":\"0.00001\"}" "$RUN_ID-par-1" \
+  "https://basescan.org/tx/" || true
+send_and_replay "ETH micro #2 A->B" "/transaction/$EVM_PATH_A" \
+  "{\"chainId\":$CHAIN_ID,\"to\":\"$B_EVM\",\"amount\":\"0.00002\"}" "$RUN_ID-par-2" \
+  "https://basescan.org/tx/" || true
 
 say "[7] Arrival check on B"
 if [ "$TRON_DELEGATED" = "1" ]; then

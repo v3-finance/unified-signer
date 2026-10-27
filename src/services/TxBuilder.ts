@@ -5,11 +5,6 @@ import { doErrorResponse } from "../lib/errors";
 import { createEvmClient } from "../lib/evm/client";
 import { estimateEvmFees } from "../lib/evm/fees";
 import {
-  nextNonce,
-  STUCK_RESERVATION_MS,
-  type NonceReservation,
-} from "../lib/evm/nonce";
-import {
   parseEvmNetworks,
   type EvmNetworkConfig,
 } from "../lib/networks";
@@ -71,99 +66,6 @@ export class TxBuilder extends DurableObject<TxBuilderEnv> {
     const client = createEvmClient(config);
     this.evmClients.set(config.key, client);
     return client;
-  }
-
-  private nonceStorageKey(chainId: number, address: `0x${string}`): string {
-    return `nonce:${chainId}:${address.toLowerCase()}`;
-  }
-
-  // Serializes nonce assignment for concurrent sends from one address: the
-  // chain's pending count does not reflect transactions this service built but
-  // has not yet broadcast, so reservations are tracked in DO storage. The
-  // final get/put pair runs with no intervening await, so the DO input gate
-  // keeps it atomic.
-  private async reserveNonce(
-    client: PublicClient,
-    config: EvmNetworkConfig,
-    address: `0x${string}`
-  ): Promise<number> {
-    const chainNonce = await client.getTransactionCount({
-      address,
-      blockTag: "pending",
-    });
-    const storageKey = this.nonceStorageKey(config.chainId, address);
-    let reservation = await this.ctx.storage.get<NonceReservation>(storageKey);
-    let finalized: number | undefined;
-
-    // A stale queue may only be reset with proof that the address is fully
-    // settled. The finalized lookup awaits, so re-read the reservation after
-    // it to keep the decision/put pair atomic under the input gate.
-    if (
-      reservation &&
-      chainNonce <= reservation.nonce &&
-      Date.now() - reservation.reservedAt >= STUCK_RESERVATION_MS
-    ) {
-      try {
-        finalized = await client.getTransactionCount({
-          address,
-          blockTag: "finalized",
-        });
-      } catch {
-        finalized = undefined;
-      }
-
-      reservation = await this.ctx.storage.get<NonceReservation>(storageKey);
-    }
-
-    const now = Date.now();
-    const nonce = nextNonce(chainNonce, reservation, now, finalized);
-    await this.ctx.storage.put<NonceReservation>(storageKey, {
-      nonce,
-      reservedAt: now,
-    });
-    return nonce;
-  }
-
-  /**
-   * Rolls the reservation back when the transaction that took the slot was
-   * abandoned before any node could have seen it. Only exact tail matches are
-   * rolled back: once another build reserved past this nonce, the queue keeps
-   * its shape and the keyed-retry / settled-reset paths heal the gap instead.
-   */
-  private async releaseNonce(body: unknown): Promise<Response> {
-    const parsed = schemas.EvmNonceReleaseRequestSchema.parse(body);
-    const config = parseEvmNetworks(this.env.EVM_NETWORKS).find(
-      (network) => network.key === parsed.network
-    );
-
-    if (!config) {
-      return json(
-        { ok: false, error: `Unknown EVM network "${parsed.network}"` },
-        400
-      );
-    }
-
-    const storageKey = this.nonceStorageKey(
-      config.chainId,
-      parsed.address as `0x${string}`
-    );
-    const reservation =
-      await this.ctx.storage.get<NonceReservation>(storageKey);
-
-    if (reservation?.nonce !== parsed.nonce) {
-      return json({ ok: false }, 200);
-    }
-
-    if (parsed.nonce === 0) {
-      await this.ctx.storage.delete(storageKey);
-    } else {
-      await this.ctx.storage.put<NonceReservation>(storageKey, {
-        nonce: parsed.nonce - 1,
-        reservedAt: Date.now(),
-      });
-    }
-
-    return json({ ok: true });
   }
 
   private async buildTron(body: unknown): Promise<Response> {
@@ -260,7 +162,14 @@ export class TxBuilder extends DurableObject<TxBuilderEnv> {
       contractAddress:
         parsed.type === "ERC20" ? parsed.contractAddress : undefined,
     });
-    const nonce = await this.reserveNonce(client, config, parsed.from);
+    // The nonce comes straight from the chain's pending count, like a regular
+    // wallet. Concurrent payouts from one address are the caller's
+    // responsibility: fired in parallel they may take the same nonce and one
+    // will replace the other.
+    const nonce = await client.getTransactionCount({
+      address: parsed.from,
+      blockTag: "pending",
+    });
 
     const base = {
       chainId: config.chainId,
@@ -307,9 +216,6 @@ export class TxBuilder extends DurableObject<TxBuilderEnv> {
         return await this.buildEvm(await req.json());
       }
 
-      if (req.method === "POST" && url.pathname === "/evmReleaseNonce") {
-        return await this.releaseNonce(await req.json());
-      }
 
       return json({ error: "Not found" }, 404);
     } catch (error) {

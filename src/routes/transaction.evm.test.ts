@@ -50,7 +50,6 @@ async function createEvmHarness() {
     receipts: new Set<string>(),
     pendingNonce: 5,
     finalizedNonce: 5,
-    released: [] as number[],
     rawSent: [] as string[],
     // Raw bytes a real node would reject with "nonce too low" (dead nonce).
     deadRaw: undefined as string | undefined,
@@ -151,15 +150,7 @@ async function createEvmHarness() {
         timestamp: 1,
       })
     ),
-    TX_BUILDER: createNamespace(async (req) => {
-      const url = new URL(req.url);
-
-      if (url.pathname === "/evmReleaseNonce") {
-        const body = (await req.json()) as { nonce: number };
-        state.released.push(body.nonce);
-        return Response.json({ ok: true });
-      }
-
+    TX_BUILDER: createNamespace(async () => {
       state.builds += 1;
       return Response.json({
         ok: true,
@@ -354,8 +345,6 @@ describe("POST /transaction/{path} (EVM) with Idempotency-Key", () => {
       retryable: false,
     });
     expect(String(body.txId)).toMatch(/^0x[0-9a-f]{64}$/);
-    // The bytes may be in some pool: the slot must NOT be rolled back.
-    expect(state.released).toEqual([]);
   });
 
   test("keyless rejection releases the abandoned nonce and is retryable", async () => {
@@ -370,7 +359,6 @@ describe("POST /transaction/{path} (EVM) with Idempotency-Key", () => {
       retryable: true,
       details: { code: "POOL_FULL" },
     });
-    expect(state.released).toEqual([5]);
   });
 
   test("keyless deterministic rejection is flagged not retryable", async () => {
@@ -384,7 +372,6 @@ describe("POST /transaction/{path} (EVM) with Idempotency-Key", () => {
       retryable: false,
       details: { code: "INTRINSIC_GAS_TOO_LOW" },
     });
-    expect(state.released).toEqual([5]);
   });
 
   test("rejects an unknown chainId with the configured list", async () => {

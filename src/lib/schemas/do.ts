@@ -127,12 +127,6 @@ export const EvmTxSignResponseSchema = z.object({
   error: z.string().optional(),
 });
 
-export const EvmNonceReleaseRequestSchema = z.object({
-  network: z.string().min(1),
-  address: EvmAddressSchema,
-  nonce: z.number().int().nonnegative(),
-});
-
 export const RegistryAddressQuerySchema = z.object({
   network: z.string().min(1),
   path: DerivationPathSchema,
@@ -190,4 +184,3 @@ export type IdempotencyLookupQuery = z.infer<typeof IdempotencyLookupQuerySchema
 export type IdempotencyBroadcastRequest = z.infer<
   typeof IdempotencyBroadcastRequestSchema
 >;
-export type EvmNonceReleaseRequest = z.infer<typeof EvmNonceReleaseRequestSchema>;
