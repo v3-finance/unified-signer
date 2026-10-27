@@ -260,11 +260,23 @@ send_and_replay "USDT(Base) $USDT_EVM_AMOUNT A->B" "/transaction/$EVM_PATH_A" \
 
 say "[6] Concurrent EVM sends (nonce reservation)"
 par_send() { # KEY AMOUNT OUTFILE — isolated curl so parallel jobs don't share state
-  curl -sS -m 90 -X POST "$BASE_URL/transaction/$EVM_PATH_A" \
-    ${AUTH_ID:+-H "CF-Access-Client-Id: $AUTH_ID"} \
-    ${AUTH_ID:+-H "CF-Access-Client-Secret: $AUTH_SECRET"} \
-    -H "Content-Type: application/json" -H "Idempotency-Key: $1" \
-    -d "{\"chainId\":$CHAIN_ID,\"to\":\"$B_EVM\",\"amount\":\"$2\"}" > "$3" 2>/dev/null
+  local attempt=0
+  while [ $attempt -lt 2 ]; do
+    curl -sS -m 90 -X POST "$BASE_URL/transaction/$EVM_PATH_A" \
+      ${AUTH_ID:+-H "CF-Access-Client-Id: $AUTH_ID"} \
+      ${AUTH_ID:+-H "CF-Access-Client-Secret: $AUTH_SECRET"} \
+      -H "Content-Type: application/json" -H "Idempotency-Key: $1" \
+      -d "{\"chainId\":$CHAIN_ID,\"to\":\"$B_EVM\",\"amount\":\"$2\"}" > "$3" 2>/dev/null
+    # Public RPCs rate-limit concurrent fee estimations; one retryable
+    # pre-sign failure gets a second chance with the SAME key (always safe).
+    if jq -e '.txId // empty' "$3" >/dev/null 2>&1; then
+      return 0
+    fi
+    if ! jq -e 'select(.retryable == true)' "$3" >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1)); sleep 5
+  done
 }
 par_send "$RUN_ID-par-1" "0.00001" "$TMP/par1.json" &
 PID1=$!
@@ -310,16 +322,31 @@ if [ "${SMOKE_SWEEP:-0}" = "1" ]; then
     send_and_replay "sweep USDT(Base) B->A" "/transaction/$EVM_PATH_B" \
       "{\"chainId\":$CHAIN_ID,\"to\":\"$A_EVM\",\"amount\":\"$AMT\",\"contractAddress\":\"$USDT_EVM\"}" "$RUN_ID-sweep-usdt-evm" "https://basescan.org/tx/" || true
   fi
+  # The token sweep above pays its gas from B's ETH: wait until that gas is
+  # actually deducted (tx mined) so the max-amount math uses the real balance.
   api GET "/wallet/balance/$EVM_PATH_B?chainId=$CHAIN_ID"; ETH_B="$(field .value)"
+  i=0
+  while [ $i -lt 24 ]; do
+    sleep 5
+    api GET "/wallet/balance/$EVM_PATH_B?chainId=$CHAIN_ID"
+    NEW_B="$(field .value)"
+    if [ -n "$NEW_B" ] && [ "$NEW_B" != "$ETH_B" ]; then
+      ETH_B="$NEW_B"; break
+    fi
+    i=$((i + 1))
+  done
+
   api POST "/calculate/fees/$EVM_PATH_B" "{\"chainId\":$CHAIN_ID,\"to\":\"$A_EVM\",\"amount\":\"0.00001\"}"
   FEE_WEI="$(field .totalFeeWei)"
   if [ -n "$ETH_B" ] && [ -n "$FEE_WEI" ]; then
+    # 2x the quoted ceiling: the built transaction re-estimates fees a moment
+    # later, and send-max must survive that drift (dust simply stays on B).
     AMT="$(python3 -c "
-b=int('$ETH_B'); f=int('$FEE_WEI'); a=b-f
+b=int('$ETH_B'); f=int('$FEE_WEI'); a=b-2*f
 print(f'{a/10**18:.18f}'.rstrip('0').rstrip('.') if a>0 else '')")"
     if [ -n "$AMT" ]; then
       send_and_replay "sweep ETH(Base) B->A" "/transaction/$EVM_PATH_B" \
-        "{\"chainId\":$CHAIN_ID,\"to\":\"$A_EVM\",\"amount\":\"$AMT\"}" "$RUN_ID-sweep-eth" "https://basescan.org/tx/" || true
+        "{\"chainId\":$CHAIN_ID,\"to\":\"$A_EVM\",\"amount\":\"$AMT\"}" "$RUN_ID-sweep-eth-$AMT" "https://basescan.org/tx/" || true
     fi
   fi
   info "TRX sweep is left for after the token sweeps confirm: re-run with SMOKE_SWEEP=1 or move it manually (amount = balance - fee - 0.000001)."
